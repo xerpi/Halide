@@ -84,6 +84,8 @@ endif ()
 # Enable the SPIR-V target if requested (must declare before processing dependencies)
 option(TARGET_SPIRV "Include SPIR-V target" OFF)
 
+option(TARGET_CIRCT "Include CIRCT target" ON)
+
 ##
 # Import dependencies
 ##

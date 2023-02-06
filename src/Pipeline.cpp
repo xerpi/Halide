@@ -4,6 +4,7 @@
 
 #include "Argument.h"
 #include "Callable.h"
+#include "CodeGen_CIRCT.h"
 #include "CodeGen_Internal.h"
 #include "FindCalls.h"
 #include "Func.h"
@@ -929,6 +930,23 @@ void Pipeline::realize(JITUserContext *context,
     user_assert(defined()) << "Can't realize an undefined Pipeline\n";
 
     debug(2) << "Realizing Pipeline for " << target << "\n";
+
+    if (target.has_feature(Target::Feature::CIRCT)) {
+        debug(2) << "Realizing for CIRCT!\n";
+        infer_arguments();
+
+        vector<Argument> args;
+        for (const InferredArgument &arg : contents->inferred_args) {
+            args.push_back(arg.arg);
+        }
+
+        Module module = compile_to_module(args, generate_function_name(), target).resolve_submodules();
+
+        CodeGen_CIRCT circt;
+        circt.compile(module);
+
+        return;
+    }
 
     if (target.has_unknowns()) {
         // If we've already jit-compiled for a specific target, use that.

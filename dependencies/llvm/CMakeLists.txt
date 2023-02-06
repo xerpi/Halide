@@ -47,6 +47,20 @@ set(Halide_LLVM_DEFS ${LLVM_DEFINITIONS} $<BUILD_INTERFACE:LLVM_VERSION=${LLVM_V
 list(REMOVE_ITEM Halide_LLVM_DEFS "-D_GLIBCXX_ASSERTIONS")
 
 ##
+# Check for CIRCT
+##
+message(CHECK_START "Looking for CIRCT")
+find_package(CIRCT QUIET)
+if (CIRCT_FOUND)
+    message(CHECK_PASS "found")
+else ()
+    message(CHECK_FAIL "not found")
+endif ()
+
+#set(CIRCT_FOUND "${CIRCT_FOUND}" CACHE INTERNAL "Whether CIRCT was found or not" FORCE)
+#set(MLIR_INCLUDE_DIRS "${MLIR_INCLUDE_DIRS}" CACHE INTERNAL "The path to MLIR includes" FORCE)
+
+##
 # Options for which version of LLVM to use
 ##
 
@@ -116,6 +130,21 @@ add_library(Halide::LLVM ALIAS Halide_LLVM)
 set_target_properties(Halide_LLVM PROPERTIES EXPORT_NAME LLVM)
 target_include_directories(Halide_LLVM INTERFACE "$<BUILD_INTERFACE:${LLVM_INCLUDE_DIRS}>")
 target_compile_definitions(Halide_LLVM INTERFACE ${Halide_LLVM_DEFS})
+
+if (TARGET_CIRCT AND CIRCT_FOUND)
+    target_compile_definitions(Halide_LLVM INTERFACE WITH_CIRCT)
+    target_include_directories(Halide_LLVM INTERFACE
+                               ${MLIR_INCLUDE_DIRS}
+                               ${CIRCT_INCLUDE_DIRS})
+    target_link_libraries(Halide_LLVM INTERFACE
+                          CIRCTComb
+                          CIRCTExportVerilog
+                          CIRCTHW
+                          CIRCTHWArith
+                          CIRCTHWArithToHW
+                          CIRCTSV
+                          MLIRIR)
+endif ()
 
 # Link LLVM libraries to Halide_LLVM, depending on shared, static, or bundled selection.
 if (Halide_SHARED_LLVM)
