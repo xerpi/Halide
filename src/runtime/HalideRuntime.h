@@ -1403,6 +1403,7 @@ typedef enum halide_target_feature_t {
     halide_target_feature_vulkan_version12,       ///< Enable Vulkan v1.2 runtime target support.
     halide_target_feature_vulkan_version13,       ///< Enable Vulkan v1.3 runtime target support.
     halide_target_feature_semihosting,            ///< Used together with Target::NoOS for the baremetal target built with semihosting library and run with semihosting mode where minimum I/O communication with a host PC is available.
+    halide_target_feature_circt,                  ///< Enable CIRCT MLIR code generation support.
     halide_target_feature_end                     ///< A sentinel. Every target is considered to have this feature, and setting this feature does nothing.
 } halide_target_feature_t;
 

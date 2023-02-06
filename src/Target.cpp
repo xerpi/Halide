@@ -540,6 +540,7 @@ const std::map<std::string, Target::Feature> feature_name_map = {
     {"vk_v12", Target::VulkanV12},
     {"vk_v13", Target::VulkanV13},
     {"semihosting", Target::Semihosting},
+    {"circt", Target::CIRCT},
     // NOTE: When adding features to this map, be sure to update PyEnums.cpp as well.
 };
 

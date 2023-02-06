@@ -189,6 +189,7 @@ void define_enums(py::module &m) {
         .value("VulkanV12", Target::VulkanV12)
         .value("VulkanV13", Target::VulkanV13)
         .value("Semihosting", Target::Feature::Semihosting)
+        .value("CIRCT", Target::Feature::CIRCT)
         .value("FeatureEnd", Target::Feature::FeatureEnd);
 
     py::enum_<halide_type_code_t>(m, "TypeCode")

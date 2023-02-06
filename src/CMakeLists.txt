@@ -195,6 +195,7 @@ set(SOURCE_FILES
     Closure.cpp
     CodeGen_ARM.cpp
     CodeGen_C.cpp
+    CodeGen_CIRCT.cpp
     CodeGen_D3D12Compute_Dev.cpp
     CodeGen_GPU_Dev.cpp
     CodeGen_Hexagon.cpp

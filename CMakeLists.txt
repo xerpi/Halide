@@ -88,6 +88,8 @@ if (TARGET_VULKAN)
     set(TARGET_SPIRV ON) # required
 endif()
 
+option(TARGET_CIRCT "Include CIRCT target" ON)
+
 ##
 # Import dependencies
 ##
