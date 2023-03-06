@@ -86,6 +86,8 @@ protected:
         void sym_pop(const std::string &name);
         mlir::Value sym_get(const std::string &name, bool must_succeed = true) const;
 
+        void truncate_int(mlir::Value &value, int size);
+
     private:
         mlir::ImplicitLocOpBuilder &builder;
         mlir::Value value;

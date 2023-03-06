@@ -1,5 +1,7 @@
 #include <vector>
 
+#include <circt/Conversion/ExportVerilog.h>
+#include <circt/Conversion/HWArithToHW.h>
 #include <circt/Dialect/Comb/CombDialect.h>
 #include <circt/Dialect/Comb/CombOps.h>
 #include <circt/Dialect/HW/HWDialect.h>
@@ -9,6 +11,7 @@
 #include <circt/Dialect/SV/SVDialect.h>
 
 #include <mlir/IR/Verifier.h>
+#include <mlir/Pass/PassManager.h>
 
 #include "CodeGen_CIRCT.h"
 #include "Debug.h"
@@ -83,17 +86,21 @@ void CodeGen_CIRCT::compile(const Module &input) {
     }
 #endif
 
-    // Define all functions
-    // int idx = 0;
-    for (const auto &f : input.functions()) {
-        //const auto names = function_names[idx++];
+    mlir::LocationAttr loc = mlir::UnknownLoc::get(&mlir_context);
+    mlir::ModuleOp mlir_module = mlir::ModuleOp::create(loc, {});
+    mlir::ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
 
+    // Translate each function into a CIRCT HWModuleOp
+    for (const auto &f : input.functions()) {
         /*run_with_large_stack([&]() {
             compile_func(f, names.simple_name, names.extern_name);
         });*/
 
-        // Generate the function body.
         debug(1) << "Generating CIRCT MLIR IR for function " << f.name << "\n";
+
+        mlir::SmallVector<circt::hw::PortInfo> ports;
+
+        // Convert function arguments to module ports (inputs and outputs)
         debug(1) << "\tArg count: " << f.args.size() << "\n";
         for (const auto &arg: f.args) {
             static const char *const kind_names[] = {
@@ -116,20 +123,78 @@ void CodeGen_CIRCT::compile(const Module &input) {
             debug(1) << "\t\t\tType: " << type_code_names[arg.type.code()] << "\n";
             debug(1) << "\t\t\tType bits: " << arg.type.bits() << "\n";
             debug(1) << "\t\t\tType lanes: " << arg.type.lanes() << "\n";
+
+            mlir::Type type;
+
+            switch (arg.kind) {
+            case Argument::Kind::InputScalar:
+                switch (arg.type.code()) {
+                case Type::Int:
+                case Type::UInt:
+                    type = builder.getIntegerType(arg.type.bits(), arg.type.is_int());
+                    break;
+                case Type::Float:
+                case Type::BFloat:
+                    assert(0 && "TODO");
+                case Type::Handle:
+                    // TODO
+                    type = builder.getIntegerType(64, false);
+                    break;
+                }
+                break;
+            case Argument::Kind::InputBuffer:
+            case Argument::Kind::OutputBuffer:
+                // Buffer descriptor
+                type = builder.getIntegerType(32, false);
+                break;
+            }
+
+            ports.push_back(circt::hw::PortInfo{builder.getStringAttr(arg.name), circt::hw::PortDirection::INPUT, type, 0});
         }
 
-        mlir::LocationAttr loc = mlir::UnknownLoc::get(&mlir_context);
-        mlir::ModuleOp mlir_module = mlir::ModuleOp::create(loc, {});
-        mlir:: ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
+        // Create module top
+        circt::hw::HWModuleOp top = builder.create<circt::hw::HWModuleOp>(builder.getStringAttr(f.name), ports);
+        builder.setInsertionPointToStart(top.getBodyBlock());
+
+        // Generate CIRCT MLIR IR
         CodeGen_CIRCT::Visitor visitor(builder);
         f.body.accept(&visitor);
+
+        // Module output
+        //circt::hw::ConstantOp c0 = builder.create<circt::hw::ConstantOp>(builder.getIntegerType(32, true), 42);
+        //auto outputOp = top.getBodyBlock()->getTerminator();
+        //outputOp->setOperands(mlir::ValueRange{c0});
+
         // Print MLIR before running passes
-        std::cout << "Generated MLIR for function " << f.name << ":" << std::endl;
+        std::cout << "Original MLIR" << std::endl;
         mlir_module.dump();
+
+        // Create and run passes
+        std::cout << "Running passes." << std::endl;
+        mlir::PassManager pm(mlir_module.getContext());
+        pm.addPass(circt::createHWArithToHWPass());
+        auto pmRunResult = pm.run(mlir_module);
+
+        std::cout << "Run passes result: " << pmRunResult.succeeded() << std::endl;
+        //std::cout << "Module inputs: " << top.getNumInputs() << ", outputs: " << top.getNumOutputs() << std::endl;
 
         // Verify module
         auto moduleVerifyResult = mlir::verify(mlir_module);
         std::cout << "Module verify result: " << moduleVerifyResult.succeeded() << std::endl;
+
+        // Print MLIR after running passes
+        std::cout << "MLIR after running passes" << std::endl;
+        mlir_module.dump();
+
+        // Exmit Verilog
+        std::string str;
+        llvm::raw_string_ostream os(str);
+        std::cout << "Exporting Verilog." << std::endl;
+        auto exportVerilogResult = circt::exportVerilog(mlir_module, os);
+        std::cout << "Export Verilog result: " << exportVerilogResult.succeeded() << std::endl;
+        std::cout << str << std::endl;
+
+        std::cout << "Done!" << std::endl;
 
     }
 
@@ -147,8 +212,8 @@ mlir::Value CodeGen_CIRCT::Visitor::codegen(const Expr &e) {
     debug(4) << "Codegen (E): " << e.type() << ", " << e << "\n";
     value = mlir::Value();
     e.accept(this);
-    //internal_assert(value) << "Codegen of an expr did not produce a MLIR value\n"
-    //                       << e;
+    internal_assert(value) << "Codegen of an expr did not produce a MLIR value\n"
+                           << e;
     return value;
 }
 
@@ -157,18 +222,20 @@ void CodeGen_CIRCT::Visitor::codegen(const Stmt &s) {
     debug(4) << "Codegen (S): " << s << "\n";
     value = mlir::Value();
     s.accept(this);
+    internal_assert(value) << "Codegen of an stmt did not produce a MLIR value\n"
+                           << s;
 }
 
 void CodeGen_CIRCT::Visitor::visit(const IntImm *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
-    value = builder.create<circt::hwarith::ConstantOp>(builder.getIntegerType(op->type.bits(), true),
-                                                       builder.getI64IntegerAttr(op->value));
+    mlir::Type type = builder.getIntegerType(op->type.bits(), op->type.is_int());
+    value = builder.create<circt::hwarith::ConstantOp>(type, builder.getIntegerAttr(type, op->value));
 }
 
 void CodeGen_CIRCT::Visitor::visit(const UIntImm *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
-    value = builder.create<circt::hwarith::ConstantOp>(builder.getIntegerType(op->type.bits(), false),
-                                                       builder.getI64IntegerAttr(op->value));
+    mlir::Type type = builder.getIntegerType(op->type.bits(), op->type.is_int());
+    value = builder.create<circt::hwarith::ConstantOp>(type, builder.getIntegerAttr(type, op->value));
 }
 
 void CodeGen_CIRCT::Visitor::visit(const FloatImm *op) {
@@ -210,46 +277,22 @@ void CodeGen_CIRCT::Visitor::visit(const Variable *op) {
 void CodeGen_CIRCT::Visitor::visit(const Add *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
 
-    mlir::Value a = codegen(op->a);
-    mlir::Value b = codegen(op->b);
-
-    value = builder.create<circt::hwarith::AddOp>(mlir::ValueRange({a, b}));
-
-    debug(1) << "Add value bits: " << value.getType().getIntOrFloatBitWidth() << ", op bits: " << op->type.bits() << "\n";
-    if (value.getType().getIntOrFloatBitWidth() != unsigned(op->type.bits())) {
-        mlir::Type new_type = builder.getIntegerType(op->type.bits(), value.getType().isSignedInteger());
-        value = builder.create<circt::hwarith::CastOp>(new_type, value);
-    }
+    value = builder.create<circt::hwarith::AddOp>(mlir::ValueRange({codegen(op->a), codegen(op->b)}));
+    truncate_int(value, op->type.bits());
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Sub *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
 
-    mlir::Value a = codegen(op->a);
-    mlir::Value b = codegen(op->b);
-
-    value = builder.create<circt::hwarith::SubOp>(mlir::ValueRange({a, b}));
-
-    debug(1) << "Sub value bits: " << value.getType().getIntOrFloatBitWidth() << ", op bits: " << op->type.bits() << "\n";
-    if (value.getType().getIntOrFloatBitWidth() != unsigned(op->type.bits())) {
-        mlir::Type new_type = builder.getIntegerType(op->type.bits(), value.getType().isSignedInteger());
-        value = builder.create<circt::hwarith::CastOp>(new_type, value);
-    }
+    value = builder.create<circt::hwarith::SubOp>(mlir::ValueRange({codegen(op->a), codegen(op->b)}));
+    truncate_int(value, op->type.bits());
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Mul *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
 
-    mlir::Value a = codegen(op->a);
-    mlir::Value b = codegen(op->b);
-
-    value = builder.create<circt::hwarith::MulOp>(mlir::ValueRange({a, b}));
-
-    debug(1) << "Mul value bits: " << value.getType().getIntOrFloatBitWidth() << ", op bits: " << op->type.bits() << "\n";
-    if (value.getType().getIntOrFloatBitWidth() != unsigned(op->type.bits())) {
-        mlir::Type new_type = builder.getIntegerType(op->type.bits(), value.getType().isSignedInteger());
-        value = builder.create<circt::hwarith::CastOp>(new_type, value);
-    }
+    value = builder.create<circt::hwarith::MulOp>(mlir::ValueRange({codegen(op->a), codegen(op->b)}));
+    truncate_int(value, op->type.bits());
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Div *op) {
@@ -302,17 +345,12 @@ void CodeGen_CIRCT::Visitor::visit(const Or *op) {
 
 void CodeGen_CIRCT::Visitor::visit(const Not *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
-    // Implement Logic NOT as XOR with all ones, and then compare with zeroes
+    debug(1) << "\tbits: " << op->type.bits() << "\n";
+    debug(1) << "\ta.bits: " << op->a.type().bits() << "\n";
+
     mlir::Value a = codegen(op->a);
-    int bits = op->a.type().bits();
-    circt::hw::ConstantOp allzeroes = builder.create<circt::hw::ConstantOp>(builder.getIntegerType(bits), 0);
-    if (bits == 1) {
-        value = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq, a, allzeroes);
-    } else { // bits > 1
-        circt::hw::ConstantOp all_minus1_zeroes = builder.create<circt::hw::ConstantOp>(builder.getIntegerType(bits - 1), 0);
-        mlir::Value cmpOp = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq, a, allzeroes);
-        value = builder.create<circt::comb::ConcatOp>(all_minus1_zeroes, cmpOp);
-    }
+    circt::hwarith::ConstantOp allzeroes = builder.create<circt::hwarith::ConstantOp>(a.getType(), builder.getIntegerAttr(a.getType(), 0));
+    value = builder.create<circt::hwarith::ICmpOp>(circt::hwarith::ICmpPredicate::eq, a, allzeroes);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Select *op) {
@@ -338,13 +376,15 @@ void CodeGen_CIRCT::Visitor::visit(const Call *op) {
     for (const Expr &e: op->args)
         debug(1) << "\tArg: " << e << "\n";
 
+    mlir::Type type = builder.getIntegerType(op->type.bits(), op->type.is_int());
+
     if (op->name == Call::buffer_get_host) {
         auto name = op->args[0].as<Variable>()->name;
         name = name.substr(0, name.find(".buffer"));
         debug(1) << "\t\targ name: " << name << "\n";
         debug(1) << "\t\top bits: " << op->type.bits() << "\n";
         // Return true
-        value = builder.create<circt::hw::ConstantOp>(builder.getIntegerType(op->type.bits()), 1);
+        value = builder.create<circt::hwarith::ConstantOp>(type, builder.getIntegerAttr(type, 1));
         //mlir::Location loc = mlir::NameLoc::get(mlir::StringAttr::get(builder.getContext(), "foo"));
         //value.setLoc(loc);
     } else if (op->name == Call::buffer_is_bounds_query) {
@@ -353,34 +393,31 @@ void CodeGen_CIRCT::Visitor::visit(const Call *op) {
         debug(1) << "\t\targ name: " << name << "\n";
         debug(1) << "\t\top bits: " << op->type.bits() << "\n";
         // Return true
-        value = builder.create<circt::hw::ConstantOp>(builder.getIntegerType(op->type.bits()), 1);
+        value = builder.create<circt::hwarith::ConstantOp>(type, builder.getIntegerAttr(type, 1));
     } else if(op->name == Call::buffer_get_min) {
         auto name = op->args[0].as<Variable>()->name;
         name = name.substr(0, name.find(".buffer"));
         debug(1) << "\t\targ name: " << name << "\n";
         debug(1) << "\t\top bits: " << op->type.bits() << "\n";
         // TODO: buf->dim[d].min
-        value = builder.create<circt::hwarith::ConstantOp>(builder.getIntegerType(op->type.bits(), true),
-                                                           builder.getSI32IntegerAttr(41));
+        value = builder.create<circt::hwarith::ConstantOp>(type, builder.getIntegerAttr(type, 41));
     } else if(op->name == Call::buffer_get_extent) {
         auto name = op->args[0].as<Variable>()->name;
         name = name.substr(0, name.find(".buffer"));
         debug(1) << "\t\targ name: " << name << "\n";
         debug(1) << "\t\top bits: " << op->type.bits() << "\n";
         // TODO: buf->dim[d].extent
-        value = builder.create<circt::hwarith::ConstantOp>(builder.getIntegerType(op->type.bits(), true),
-                                                           builder.getSI32IntegerAttr(42));
+        value = builder.create<circt::hwarith::ConstantOp>(type, builder.getIntegerAttr(type, 42));
     } else if(op->name == Call::buffer_get_stride) {
         auto name = op->args[0].as<Variable>()->name;
         name = name.substr(0, name.find(".buffer"));
         debug(1) << "\t\targ name: " << name << "\n";
         debug(1) << "\t\top bits: " << op->type.bits() << "\n";
         // TODO: buf->dim[d].stride
-        value = builder.create<circt::hwarith::ConstantOp>(builder.getIntegerType(op->type.bits(), true),
-                                                           builder.getSI32IntegerAttr(43));
+        value = builder.create<circt::hwarith::ConstantOp>(type, builder.getIntegerAttr(type, 43));
     } else {
         // Just return 1 for now
-        value = builder.create<circt::hw::ConstantOp>(builder.getIntegerType(op->type.bits()), 1);
+        value = builder.create<circt::hwarith::ConstantOp>(type, builder.getIntegerAttr(type, 1));
     }
 }
 
@@ -555,6 +592,13 @@ mlir::Value CodeGen_CIRCT::Visitor::sym_get(const std::string &name, bool must_s
         }
     }
     return symbol_table.get(name);
+}
+
+void CodeGen_CIRCT::Visitor::truncate_int(mlir::Value &value, int size) {
+    if (value.getType().getIntOrFloatBitWidth() != unsigned(size)) {
+        mlir::Type new_type = builder.getIntegerType(size, value.getType().isSignedInteger());
+        value = builder.create<circt::hwarith::CastOp>(new_type, value);
+    }
 }
 
 }  // namespace Internal
