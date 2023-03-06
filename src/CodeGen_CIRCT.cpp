@@ -222,8 +222,6 @@ void CodeGen_CIRCT::Visitor::codegen(const Stmt &s) {
     debug(4) << "Codegen (S): " << s << "\n";
     value = mlir::Value();
     s.accept(this);
-    internal_assert(value) << "Codegen of an stmt did not produce a MLIR value\n"
-                           << s;
 }
 
 void CodeGen_CIRCT::Visitor::visit(const IntImm *op) {
@@ -266,6 +264,9 @@ void CodeGen_CIRCT::Visitor::visit(const Cast *op) {
 
 void CodeGen_CIRCT::Visitor::visit(const Reinterpret *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
+
+    value = codegen(op->value);
+    value = builder.create<circt::hwarith::CastOp>(builder.getIntegerType(op->type.bits(), op->type.is_int()), value);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Variable *op) {
@@ -297,56 +298,114 @@ void CodeGen_CIRCT::Visitor::visit(const Mul *op) {
 
 void CodeGen_CIRCT::Visitor::visit(const Div *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
+
+    value = builder.create<circt::hwarith::DivOp>(mlir::ValueRange({codegen(op->a), codegen(op->b)}));
+    truncate_int(value, op->type.bits());
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Mod *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
+
+    // (num - (divisor * (num / divisor)));
+    mlir::Value a = codegen(op->a);
+    mlir::Value b = codegen(op->b);
+    mlir::Value div = builder.create<circt::hwarith::DivOp>(mlir::ValueRange({a, b}));
+    mlir::Value mul = builder.create<circt::hwarith::MulOp>(mlir::ValueRange({b, div}));
+    value = builder.create<circt::hwarith::SubOp>(mlir::ValueRange({a, mul}));
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Min *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
+
+    mlir::Value a = codegen(op->a);
+    mlir::Value b = codegen(op->b);
+    mlir::Value cond = builder.create<circt::hwarith::ICmpOp>(circt::hwarith::ICmpPredicate::lt, a, b);
+    value = builder.create<circt::comb::MuxOp>(cond, a, b);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Max *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
+
+    mlir::Value a = codegen(op->a);
+    mlir::Value b = codegen(op->b);
+    mlir::Value cond = builder.create<circt::hwarith::ICmpOp>(circt::hwarith::ICmpPredicate::gt, a, b);
+    value = builder.create<circt::comb::MuxOp>(cond, a, b);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const EQ *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
+
+    mlir::Value a = codegen(op->a);
+    mlir::Value b = codegen(op->b);
+    value = builder.create<circt::hwarith::ICmpOp>(circt::hwarith::ICmpPredicate::eq, a, b);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const NE *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
+
+    mlir::Value a = codegen(op->a);
+    mlir::Value b = codegen(op->b);
+    value = builder.create<circt::hwarith::ICmpOp>(circt::hwarith::ICmpPredicate::ne, a, b);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const LT *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
+
+    mlir::Value a = codegen(op->a);
+    mlir::Value b = codegen(op->b);
+    value = builder.create<circt::hwarith::ICmpOp>(circt::hwarith::ICmpPredicate::lt, a, b);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const LE *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
+
+    mlir::Value a = codegen(op->a);
+    mlir::Value b = codegen(op->b);
+    value = builder.create<circt::hwarith::ICmpOp>(circt::hwarith::ICmpPredicate::le, a, b);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const GT *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
+
+    mlir::Value a = codegen(op->a);
+    mlir::Value b = codegen(op->b);
+    value = builder.create<circt::hwarith::ICmpOp>(circt::hwarith::ICmpPredicate::gt, a, b);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const GE *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
+
+    mlir::Value a = codegen(op->a);
+    mlir::Value b = codegen(op->b);
+    value = builder.create<circt::hwarith::ICmpOp>(circt::hwarith::ICmpPredicate::ge, a, b);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const And *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
+
+    mlir::Value a = codegen(op->a);
+    mlir::Value b = codegen(op->b);
+    circt::hwarith::ConstantOp allzeroes_a = builder.create<circt::hwarith::ConstantOp>(a.getType(), builder.getIntegerAttr(a.getType(), 0));
+    circt::hwarith::ConstantOp allzeroes_b = builder.create<circt::hwarith::ConstantOp>(b.getType(), builder.getIntegerAttr(b.getType(), 0));
+    mlir::Value isnotzero_a = builder.create<circt::hwarith::ICmpOp>(circt::hwarith::ICmpPredicate::ne, a, allzeroes_a);
+    mlir::Value isnotzero_b = builder.create<circt::hwarith::ICmpOp>(circt::hwarith::ICmpPredicate::ne, b, allzeroes_b);
+    value = builder.create<circt::comb::AndOp>(isnotzero_a, isnotzero_b);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Or *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
+
+    mlir::Value a = codegen(op->a);
+    mlir::Value b = codegen(op->b);
+    circt::hwarith::ConstantOp allzeroes_a = builder.create<circt::hwarith::ConstantOp>(a.getType(), builder.getIntegerAttr(a.getType(), 0));
+    circt::hwarith::ConstantOp allzeroes_b = builder.create<circt::hwarith::ConstantOp>(b.getType(), builder.getIntegerAttr(b.getType(), 0));
+    mlir::Value isnotzero_a = builder.create<circt::hwarith::ICmpOp>(circt::hwarith::ICmpPredicate::ne, a, allzeroes_a);
+    mlir::Value isnotzero_b = builder.create<circt::hwarith::ICmpOp>(circt::hwarith::ICmpPredicate::ne, b, allzeroes_b);
+    value = builder.create<circt::comb::OrOp>(isnotzero_a, isnotzero_b);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Not *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
-    debug(1) << "\tbits: " << op->type.bits() << "\n";
-    debug(1) << "\ta.bits: " << op->a.type().bits() << "\n";
 
     mlir::Value a = codegen(op->a);
     circt::hwarith::ConstantOp allzeroes = builder.create<circt::hwarith::ConstantOp>(a.getType(), builder.getIntegerAttr(a.getType(), 0));
@@ -355,6 +414,11 @@ void CodeGen_CIRCT::Visitor::visit(const Not *op) {
 
 void CodeGen_CIRCT::Visitor::visit(const Select *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
+
+    mlir::Value cond = codegen(op->condition);
+    mlir::Value a = codegen(op->true_value);
+    mlir::Value b = codegen(op->false_value);
+    value = builder.create<circt::comb::MuxOp>(cond, a, b);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Load *op) {
@@ -423,6 +487,10 @@ void CodeGen_CIRCT::Visitor::visit(const Call *op) {
 
 void CodeGen_CIRCT::Visitor::visit(const Let *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
+
+    sym_push(op->name, codegen(op->value));
+    value = codegen(op->body);
+    sym_pop(op->name);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const LetStmt *op) {
@@ -460,7 +528,7 @@ void CodeGen_CIRCT::Visitor::visit(const For *op) {
     debug(1) << "\tForType: " << for_types[unsigned(op->for_type)] << "\n";
 
     mlir::Value min = codegen(op->min);
-    mlir::Value extent = codegen(op->extent);
+    //mlir::Value extent = codegen(op->extent);
 
     sym_push(op->name, min);
     codegen(op->body);
@@ -471,9 +539,9 @@ void CodeGen_CIRCT::Visitor::visit(const Store *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
     debug(1) << "\tName: " << op->name << "\n";
 
-    mlir::Value predicate = codegen(op->predicate);
-    mlir::Value value = codegen(op->value);
-    mlir::Value index = codegen(op->index);
+    //mlir::Value predicate = codegen(op->predicate);
+    //mlir::Value value = codegen(op->value);
+    //mlir::Value index = codegen(op->index);
 
     // if (predicate) buffer[op->name].store(index, value);
 }
