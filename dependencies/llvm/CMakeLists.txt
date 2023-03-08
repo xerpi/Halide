@@ -145,6 +145,7 @@ if (TARGET_CIRCT AND CIRCT_FOUND)
                           CIRCTSeq
                           CIRCTSeqTransforms
                           CIRCTSV
+                          CIRCTSVTransforms
                           MLIRIR)
 endif ()
 

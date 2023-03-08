@@ -13,6 +13,7 @@
 #include <circt/Dialect/Seq/SeqPasses.h>
 #include <circt/Dialect/SV/SVDialect.h>
 #include <circt/Dialect/SV/SVOps.h>
+#include <circt/Dialect/SV/SVPasses.h>
 
 #include <mlir/IR/Verifier.h>
 #include <mlir/Pass/PassManager.h>
@@ -185,22 +186,12 @@ void CodeGen_CIRCT::compile(const Module &input) {
         mlir::PassManager pm(mlir_module.getContext());
         pm.addPass(circt::createHWArithToHWPass());
         pm.addPass(circt::seq::createSeqLowerToSVPass());
-#if 0
-        pm.addPass(circt::createSimpleCanonicalizerPass());
-        pm.nest<circt::hw::HWModuleOp>().addPass(circt::circt::seq::createLowerSeqHLMemPass());
-        pm.nest<circt::hw::HWModuleOp>().addPass(circt::seq::createSeqFIRRTLLowerToSVPass());
-        pm.addPass(circt::sv::createHWMemSimImplPass(false, false));
-        pm.addPass(circt::seq::createSeqLowerToSVPass());
         pm.nest<circt::hw::HWModuleOp>().addPass(circt::sv::createHWCleanupPass());
-
         // Legalize unsupported operations within the modules.
-        pm.nest<circt::hw::HWModuleOp>().addPass(sv::createHWLegalizeModulesPass());
-        pm.addPass(circt::createSimpleCanonicalizerPass());
-
+        pm.nest<circt::hw::HWModuleOp>().addPass(circt::sv::createHWLegalizeModulesPass());
         // Tidy up the IR to improve verilog emission quality.
-        auto &modulePM = pm.nestcirct::<hw::HWModuleOp>();
+        auto &modulePM = pm.nest<circt::hw::HWModuleOp>();
         modulePM.addPass(circt::sv::createPrettifyVerilogPass());
-#endif
 
         auto pmRunResult = pm.run(mlir_module);
 
