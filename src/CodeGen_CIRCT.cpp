@@ -557,26 +557,35 @@ void CodeGen_CIRCT::Visitor::visit(const For *op) {
     debug(1) << "\tForType: " << for_types[unsigned(op->for_type)] << "\n";
 
     mlir::Value clk = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(true));
-    mlir::Value ce = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(true));
+    mlir::Value clock_enable = builder.create<circt::sv::LogicOp>(builder.getI1Type(), op->name + "_next");
+    mlir::Value clock_enable_read = builder.create<circt::sv::ReadInOutOp>(clock_enable);
     mlir::Value reset = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(false));
 
-    // Execute the 'body' statement for all values of the variable 'name' from 'min' to 'min + extent'
     mlir::Value min = codegen(op->min);
     mlir::Value max = codegen(Add::make(op->min, op->extent));
     mlir::Type type = builder.getIntegerType(max.getType().getIntOrFloatBitWidth());
     mlir::Value min_signless = builder.create<circt::hwarith::CastOp>(type, min);
 
-    mlir::Value iterator_next = builder.create<circt::sv::LogicOp>(type, "iterator_next");
+    mlir::Value iterator_next = builder.create<circt::sv::LogicOp>(type, op->name + "_next_val");
     mlir::Value iterator_next_read = builder.create<circt::sv::ReadInOutOp>(iterator_next);
-    mlir::Value iterator = builder.create<circt::seq::CompRegClockEnabledOp>(iterator_next_read, clk, ce, reset, min_signless, op->name);
+    mlir::Value iterator = builder.create<circt::seq::CompRegClockEnabledOp>(iterator_next_read, clk, clock_enable_read, reset, min_signless, op->name);
+    mlir::Value iterator_with_sign = builder.create<circt::hwarith::CastOp>(max.getType(), iterator);
 
     mlir::Value const_1 = builder.create<circt::hw::ConstantOp>(type, builder.getIntegerAttr(type, 1));
     mlir::Value iterator_add_1 = builder.create<circt::comb::AddOp>(iterator, const_1);
     builder.create<circt::sv::AssignOp>(iterator_next, iterator_add_1);
 
-    sym_push(op->name, builder.create<circt::hwarith::CastOp>(max.getType(), iterator));
+    loop_done = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(true));
+
+    sym_push(op->name, iterator_with_sign);
     codegen(op->body);
     sym_pop(op->name);
+
+    // An iteration can advance when: 1) all the inner loops have finished and 2) all memory accesses in the loop body have finished
+    builder.create<circt::sv::AssignOp>(clock_enable, loop_done);
+
+    mlir::Value max_reached = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq, iterator, to_signless(max));
+    loop_done = builder.create<circt::comb::AndOp>(loop_done, max_reached);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Store *op) {
@@ -596,6 +605,12 @@ void CodeGen_CIRCT::Visitor::visit(const Provide *op) {
 
 void CodeGen_CIRCT::Visitor::visit(const Allocate *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
+
+    int32_t size = op->constant_allocation_size();
+
+    debug(1) << "  size: " << size << "\n";
+
+    codegen(op->body);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Free *op) {

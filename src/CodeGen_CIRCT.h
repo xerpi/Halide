@@ -97,6 +97,7 @@ protected:
     private:
         mlir::ImplicitLocOpBuilder &builder;
         mlir::Value value;
+        mlir::Value loop_done;
         Scope<mlir::Value> symbol_table;
     };
 
