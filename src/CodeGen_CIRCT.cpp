@@ -556,18 +556,19 @@ void CodeGen_CIRCT::Visitor::visit(const For *op) {
     };
     debug(1) << "\tForType: " << for_types[unsigned(op->for_type)] << "\n";
 
-    mlir::Value clk = builder.create<circt::hw::ConstantOp>(builder.getI1Type(), builder.getBoolAttr(true));
-    //mlir::Value ce = builder.create<circt::hw::ConstantOp>(builder.getI1Type(), builder.getBoolAttr(true));
-    mlir::Value reset = builder.create<circt::hw::ConstantOp>(builder.getI1Type(), builder.getBoolAttr(false));
+    mlir::Value clk = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(true));
+    mlir::Value ce = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(true));
+    mlir::Value reset = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(false));
 
     // Execute the 'body' statement for all values of the variable 'name' from 'min' to 'min + extent'
     mlir::Value min = codegen(op->min);
     mlir::Value max = codegen(Add::make(op->min, op->extent));
     mlir::Type type = builder.getIntegerType(max.getType().getIntOrFloatBitWidth());
+    mlir::Value min_signless = builder.create<circt::hwarith::CastOp>(type, min);
 
     mlir::Value iterator_next = builder.create<circt::sv::LogicOp>(type, "iterator_next");
     mlir::Value iterator_next_read = builder.create<circt::sv::ReadInOutOp>(iterator_next);
-    mlir::Value iterator = builder.create<circt::seq::CompRegOp>(iterator_next_read, clk, reset, min, op->name);
+    mlir::Value iterator = builder.create<circt::seq::CompRegClockEnabledOp>(iterator_next_read, clk, ce, reset, min_signless, op->name);
 
     mlir::Value const_1 = builder.create<circt::hw::ConstantOp>(type, builder.getIntegerAttr(type, 1));
     mlir::Value iterator_add_1 = builder.create<circt::comb::AddOp>(iterator, const_1);
