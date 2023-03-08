@@ -8,12 +8,17 @@
 #include <circt/Dialect/HW/HWOps.h>
 #include <circt/Dialect/HWArith/HWArithDialect.h>
 #include <circt/Dialect/HWArith/HWArithOps.h>
+#include <circt/Dialect/Seq/SeqDialect.h>
+#include <circt/Dialect/Seq/SeqOps.h>
+#include <circt/Dialect/Seq/SeqPasses.h>
 #include <circt/Dialect/SV/SVDialect.h>
+#include <circt/Dialect/SV/SVOps.h>
 
 #include <mlir/IR/Verifier.h>
 #include <mlir/Pass/PassManager.h>
 
 #include "CodeGen_CIRCT.h"
+#include "CodeGen_Internal.h"
 #include "Debug.h"
 #include "IROperator.h"
 #include "Util.h"
@@ -27,6 +32,7 @@ CodeGen_CIRCT::CodeGen_CIRCT() {
     mlir_context.loadDialect<circt::comb::CombDialect>();
     mlir_context.loadDialect<circt::hw::HWDialect>();
     mlir_context.loadDialect<circt::hwarith::HWArithDialect>();
+    mlir_context.loadDialect<circt::seq::SeqDialect>();
     mlir_context.loadDialect<circt::sv::SVDialect>();
     create_halide_circt_types();
 }
@@ -86,17 +92,17 @@ void CodeGen_CIRCT::compile(const Module &input) {
     }
 #endif
 
-    mlir::LocationAttr loc = mlir::UnknownLoc::get(&mlir_context);
-    mlir::ModuleOp mlir_module = mlir::ModuleOp::create(loc, {});
-    mlir::ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
-
     // Translate each function into a CIRCT HWModuleOp
     for (const auto &f : input.functions()) {
         /*run_with_large_stack([&]() {
             compile_func(f, names.simple_name, names.extern_name);
         });*/
 
-        debug(1) << "Generating CIRCT MLIR IR for function " << f.name << "\n";
+        std::cout << "Generating CIRCT MLIR IR for function " << f.name << std::endl;
+
+        mlir::LocationAttr loc = mlir::UnknownLoc::get(&mlir_context);
+        mlir::ModuleOp mlir_module = mlir::ModuleOp::create(loc, {});
+        mlir::ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
 
         mlir::SmallVector<circt::hw::PortInfo> ports;
 
@@ -157,7 +163,7 @@ void CodeGen_CIRCT::compile(const Module &input) {
         builder.setInsertionPointToStart(top.getBodyBlock());
 
         // Generate CIRCT MLIR IR
-        CodeGen_CIRCT::Visitor visitor(builder);
+        CodeGen_CIRCT::Visitor visitor(builder, top);
         f.body.accept(&visitor);
 
         // Module output
@@ -169,22 +175,46 @@ void CodeGen_CIRCT::compile(const Module &input) {
         std::cout << "Original MLIR" << std::endl;
         mlir_module.dump();
 
+        // Verify module (before running passes)
+        auto moduleVerifyResult = mlir::verify(mlir_module);
+        std::cout << "Module verify (before passess) result: " << moduleVerifyResult.succeeded() << std::endl;
+        internal_assert(moduleVerifyResult.succeeded());
+
         // Create and run passes
         std::cout << "Running passes." << std::endl;
         mlir::PassManager pm(mlir_module.getContext());
         pm.addPass(circt::createHWArithToHWPass());
+        pm.addPass(circt::seq::createSeqLowerToSVPass());
+#if 0
+        pm.addPass(circt::createSimpleCanonicalizerPass());
+        pm.nest<circt::hw::HWModuleOp>().addPass(circt::circt::seq::createLowerSeqHLMemPass());
+        pm.nest<circt::hw::HWModuleOp>().addPass(circt::seq::createSeqFIRRTLLowerToSVPass());
+        pm.addPass(circt::sv::createHWMemSimImplPass(false, false));
+        pm.addPass(circt::seq::createSeqLowerToSVPass());
+        pm.nest<circt::hw::HWModuleOp>().addPass(circt::sv::createHWCleanupPass());
+
+        // Legalize unsupported operations within the modules.
+        pm.nest<circt::hw::HWModuleOp>().addPass(sv::createHWLegalizeModulesPass());
+        pm.addPass(circt::createSimpleCanonicalizerPass());
+
+        // Tidy up the IR to improve verilog emission quality.
+        auto &modulePM = pm.nestcirct::<hw::HWModuleOp>();
+        modulePM.addPass(circt::sv::createPrettifyVerilogPass());
+#endif
+
         auto pmRunResult = pm.run(mlir_module);
 
         std::cout << "Run passes result: " << pmRunResult.succeeded() << std::endl;
-        //std::cout << "Module inputs: " << top.getNumInputs() << ", outputs: " << top.getNumOutputs() << std::endl;
-
-        // Verify module
-        auto moduleVerifyResult = mlir::verify(mlir_module);
-        std::cout << "Module verify result: " << moduleVerifyResult.succeeded() << std::endl;
+        std::cout << "Module inputs: " << top.getNumInputs() << ", outputs: " << top.getNumOutputs() << std::endl;
 
         // Print MLIR after running passes
         std::cout << "MLIR after running passes" << std::endl;
         mlir_module.dump();
+
+        // Verify module (after running passes)
+        moduleVerifyResult = mlir::verify(mlir_module);
+        std::cout << "Module verify (after passes) result: " << moduleVerifyResult.succeeded() << std::endl;
+        internal_assert(moduleVerifyResult.succeeded());
 
         // Exmit Verilog
         std::string str;
@@ -205,6 +235,16 @@ void CodeGen_CIRCT::create_halide_circt_types() {
     //if (std::is_same<decltype(halide_buffer_t::)::element_type, int>::value) {
 
     //}
+}
+
+CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, circt::hw::HWModuleOp &top)
+    : builder(builder) {
+
+    // Add function arguments to the symbol table
+    for (unsigned i = 0; i < top.getNumArguments(); i++) {
+        std::string name = top.getArgNames()[i].cast<mlir::StringAttr>().str();
+        sym_push(name, top.getArgument(i));
+    }
 }
 
 mlir::Value CodeGen_CIRCT::Visitor::codegen(const Expr &e) {
@@ -257,6 +297,7 @@ void CodeGen_CIRCT::Visitor::visit(const Cast *op) {
 
     if (src.is_int_or_uint() && dst.is_int_or_uint()) {
         value = builder.create<circt::hwarith::CastOp>(builder.getIntegerType(dst.bits(), dst.is_int()), value);
+        // circt::hw::BitcastOp
     } else {
         assert(0);
     }
@@ -279,57 +320,54 @@ void CodeGen_CIRCT::Visitor::visit(const Add *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
 
     value = builder.create<circt::hwarith::AddOp>(mlir::ValueRange({codegen(op->a), codegen(op->b)}));
-    truncate_int(value, op->type.bits());
+    value = truncate_int(value, op->type.bits());
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Sub *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
 
     value = builder.create<circt::hwarith::SubOp>(mlir::ValueRange({codegen(op->a), codegen(op->b)}));
-    truncate_int(value, op->type.bits());
+    value = truncate_int(value, op->type.bits());
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Mul *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
 
     value = builder.create<circt::hwarith::MulOp>(mlir::ValueRange({codegen(op->a), codegen(op->b)}));
-    truncate_int(value, op->type.bits());
+    value = truncate_int(value, op->type.bits());
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Div *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
 
     value = builder.create<circt::hwarith::DivOp>(mlir::ValueRange({codegen(op->a), codegen(op->b)}));
-    truncate_int(value, op->type.bits());
+    value = truncate_int(value, op->type.bits());
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Mod *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
 
-    // (num - (divisor * (num / divisor)));
-    mlir::Value a = codegen(op->a);
-    mlir::Value b = codegen(op->b);
-    mlir::Value div = builder.create<circt::hwarith::DivOp>(mlir::ValueRange({a, b}));
-    mlir::Value mul = builder.create<circt::hwarith::MulOp>(mlir::ValueRange({b, div}));
-    value = builder.create<circt::hwarith::SubOp>(mlir::ValueRange({a, mul}));
+    value = codegen(lower_int_uint_mod(op->a, op->b));
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Min *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
 
-    mlir::Value a = codegen(op->a);
-    mlir::Value b = codegen(op->b);
-    mlir::Value cond = builder.create<circt::hwarith::ICmpOp>(circt::hwarith::ICmpPredicate::lt, a, b);
-    value = builder.create<circt::comb::MuxOp>(cond, a, b);
+    std::string a_name = unique_name('a');
+    std::string b_name = unique_name('b');
+    Expr a = Variable::make(op->a.type(), a_name);
+    Expr b = Variable::make(op->b.type(), b_name);
+    value = codegen(Let::make(a_name, op->a, Let::make(b_name, op->b, select(a < b, a, b))));
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Max *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
 
-    mlir::Value a = codegen(op->a);
-    mlir::Value b = codegen(op->b);
-    mlir::Value cond = builder.create<circt::hwarith::ICmpOp>(circt::hwarith::ICmpPredicate::gt, a, b);
-    value = builder.create<circt::comb::MuxOp>(cond, a, b);
+    std::string a_name = unique_name('a');
+    std::string b_name = unique_name('b');
+    Expr a = Variable::make(op->a.type(), a_name);
+    Expr b = Variable::make(op->b.type(), b_name);
+    value = codegen(Let::make(a_name, op->a, Let::make(b_name, op->b, select(a > b, a, b))));
 }
 
 void CodeGen_CIRCT::Visitor::visit(const EQ *op) {
@@ -389,7 +427,7 @@ void CodeGen_CIRCT::Visitor::visit(const And *op) {
     circt::hwarith::ConstantOp allzeroes_b = builder.create<circt::hwarith::ConstantOp>(b.getType(), builder.getIntegerAttr(b.getType(), 0));
     mlir::Value isnotzero_a = builder.create<circt::hwarith::ICmpOp>(circt::hwarith::ICmpPredicate::ne, a, allzeroes_a);
     mlir::Value isnotzero_b = builder.create<circt::hwarith::ICmpOp>(circt::hwarith::ICmpPredicate::ne, b, allzeroes_b);
-    value = builder.create<circt::comb::AndOp>(isnotzero_a, isnotzero_b);
+    value = to_unsigned(builder.create<circt::comb::AndOp>(to_signless(isnotzero_a), to_signless(isnotzero_b)));
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Or *op) {
@@ -401,7 +439,7 @@ void CodeGen_CIRCT::Visitor::visit(const Or *op) {
     circt::hwarith::ConstantOp allzeroes_b = builder.create<circt::hwarith::ConstantOp>(b.getType(), builder.getIntegerAttr(b.getType(), 0));
     mlir::Value isnotzero_a = builder.create<circt::hwarith::ICmpOp>(circt::hwarith::ICmpPredicate::ne, a, allzeroes_a);
     mlir::Value isnotzero_b = builder.create<circt::hwarith::ICmpOp>(circt::hwarith::ICmpPredicate::ne, b, allzeroes_b);
-    value = builder.create<circt::comb::OrOp>(isnotzero_a, isnotzero_b);
+    value = to_unsigned(builder.create<circt::comb::OrOp>(to_signless(isnotzero_a), to_signless(isnotzero_b)));
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Not *op) {
@@ -418,7 +456,7 @@ void CodeGen_CIRCT::Visitor::visit(const Select *op) {
     mlir::Value cond = codegen(op->condition);
     mlir::Value a = codegen(op->true_value);
     mlir::Value b = codegen(op->false_value);
-    value = builder.create<circt::comb::MuxOp>(cond, a, b);
+    value = builder.create<circt::comb::MuxOp>(to_signless(cond), a, b);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Load *op) {
@@ -527,10 +565,24 @@ void CodeGen_CIRCT::Visitor::visit(const For *op) {
     };
     debug(1) << "\tForType: " << for_types[unsigned(op->for_type)] << "\n";
 
-    mlir::Value min = codegen(op->min);
-    //mlir::Value extent = codegen(op->extent);
+    mlir::Value clk = builder.create<circt::hw::ConstantOp>(builder.getI1Type(), builder.getBoolAttr(true));
+    //mlir::Value ce = builder.create<circt::hw::ConstantOp>(builder.getI1Type(), builder.getBoolAttr(true));
+    mlir::Value reset = builder.create<circt::hw::ConstantOp>(builder.getI1Type(), builder.getBoolAttr(false));
 
-    sym_push(op->name, min);
+    // Execute the 'body' statement for all values of the variable 'name' from 'min' to 'min + extent'
+    mlir::Value min = codegen(op->min);
+    mlir::Value max = codegen(Add::make(op->min, op->extent));
+    mlir::Type type = builder.getIntegerType(max.getType().getIntOrFloatBitWidth());
+
+    mlir::Value iterator_next = builder.create<circt::sv::LogicOp>(type, "iterator_next");
+    mlir::Value iterator_next_read = builder.create<circt::sv::ReadInOutOp>(iterator_next);
+    mlir::Value iterator = builder.create<circt::seq::CompRegOp>(iterator_next_read, clk, reset, min, op->name);
+
+    mlir::Value const_1 = builder.create<circt::hw::ConstantOp>(type, builder.getIntegerAttr(type, 1));
+    mlir::Value iterator_add_1 = builder.create<circt::comb::AddOp>(iterator, const_1);
+    builder.create<circt::sv::AssignOp>(iterator_next, iterator_add_1);
+
+    sym_push(op->name, builder.create<circt::hwarith::CastOp>(max.getType(), iterator));
     codegen(op->body);
     sym_pop(op->name);
 }
@@ -662,11 +714,36 @@ mlir::Value CodeGen_CIRCT::Visitor::sym_get(const std::string &name, bool must_s
     return symbol_table.get(name);
 }
 
-void CodeGen_CIRCT::Visitor::truncate_int(mlir::Value &value, int size) {
+mlir::Value CodeGen_CIRCT::Visitor::truncate_int(const mlir::Value &value, int size) {
     if (value.getType().getIntOrFloatBitWidth() != unsigned(size)) {
         mlir::Type new_type = builder.getIntegerType(size, value.getType().isSignedInteger());
-        value = builder.create<circt::hwarith::CastOp>(new_type, value);
+        return builder.create<circt::hwarith::CastOp>(new_type, value);
     }
+    return value;
+}
+
+mlir::Value CodeGen_CIRCT::Visitor::to_sign(const mlir::Value &value, bool isSigned) {
+    if (value.getType().isSignlessInteger()) {
+        mlir::Type new_type = builder.getIntegerType(value.getType().getIntOrFloatBitWidth(), isSigned);
+        return builder.create<circt::hwarith::CastOp>(new_type, value);
+    }
+    return value;
+}
+
+mlir::Value CodeGen_CIRCT::Visitor::to_signed(const mlir::Value &value) {
+    return to_sign(value, true);
+}
+
+mlir::Value CodeGen_CIRCT::Visitor::to_unsigned(const mlir::Value &value) {
+    return to_sign(value, false);
+}
+
+mlir::Value CodeGen_CIRCT::Visitor::to_signless(const mlir::Value &value) {
+    if (!value.getType().isSignlessInteger()) {
+        mlir::Type new_type = builder.getIntegerType(value.getType().getIntOrFloatBitWidth());
+        return builder.create<circt::hwarith::CastOp>(new_type, value);
+    }
+    return value;
 }
 
 }  // namespace Internal

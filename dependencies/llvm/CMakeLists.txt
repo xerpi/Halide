@@ -142,6 +142,8 @@ if (TARGET_CIRCT AND CIRCT_FOUND)
                           CIRCTHW
                           CIRCTHWArith
                           CIRCTHWArithToHW
+                          CIRCTSeq
+                          CIRCTSeqTransforms
                           CIRCTSV
                           MLIRIR)
 endif ()

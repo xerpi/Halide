@@ -7,6 +7,8 @@
 
 #include <string>
 
+#include <circt/Dialect/HW/HWOps.h>
+
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/ImplicitLocOpBuilder.h>
 #include <mlir/IR/MLIRContext.h>
@@ -28,7 +30,7 @@ public:
 protected:
     class Visitor : public IRVisitor {
     public:
-        Visitor(mlir::ImplicitLocOpBuilder &builder) : builder(builder) {}
+        Visitor(mlir::ImplicitLocOpBuilder &builder, circt::hw::HWModuleOp &top);
 
     protected:
         mlir::Value codegen(const Expr &);
@@ -86,7 +88,11 @@ protected:
         void sym_pop(const std::string &name);
         mlir::Value sym_get(const std::string &name, bool must_succeed = true) const;
 
-        void truncate_int(mlir::Value &value, int size);
+        mlir::Value truncate_int(const mlir::Value &value, int size);
+        mlir::Value to_sign(const mlir::Value &value, bool isSigned);
+        mlir::Value to_signed(const mlir::Value &value);
+        mlir::Value to_unsigned(const mlir::Value &value);
+        mlir::Value to_signless(const mlir::Value &value);
 
     private:
         mlir::ImplicitLocOpBuilder &builder;
