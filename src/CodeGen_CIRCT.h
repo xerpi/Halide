@@ -30,7 +30,7 @@ public:
 protected:
     class Visitor : public IRVisitor {
     public:
-        Visitor(mlir::ImplicitLocOpBuilder &builder, circt::hw::HWModuleOp &top);
+        Visitor(mlir::ImplicitLocOpBuilder &builder, circt::hw::HWModuleOp &top, const std::vector<LoweredArgument> &buffer_arguments);
 
     protected:
         mlir::Value codegen(const Expr &);
@@ -99,6 +99,12 @@ protected:
         mlir::Value value;
         mlir::Value loop_done;
         Scope<mlir::Value> symbol_table;
+
+        struct BufferInfo {
+            mlir::Value dim_array;
+            int dim_num;
+        };
+        std::map<std::string, BufferInfo> buffers;
     };
 
 private:

@@ -106,6 +106,8 @@ void CodeGen_CIRCT::compile(const Module &input) {
         mlir::ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
 
         mlir::SmallVector<circt::hw::PortInfo> ports;
+        //std::vector<LoweredArgument> scalar_arguments;
+        std::vector<LoweredArgument> buffer_arguments;
 
         // Convert function arguments to module ports (inputs and outputs)
         debug(1) << "\tArg count: " << f.args.size() << "\n";
@@ -139,24 +141,43 @@ void CodeGen_CIRCT::compile(const Module &input) {
                 case Type::Int:
                 case Type::UInt:
                     type = builder.getIntegerType(arg.type.bits(), arg.type.is_int());
+                    ports.push_back(circt::hw::PortInfo{builder.getStringAttr(arg.name), circt::hw::PortDirection::INPUT, type, 0});
                     break;
                 case Type::Float:
                 case Type::BFloat:
                     assert(0 && "TODO");
+                    break;
                 case Type::Handle:
-                    // TODO
-                    type = builder.getIntegerType(64, false);
+                    // TODO: Ignore for now
                     break;
                 }
+                //scalar_arguments.push_back(arg);
                 break;
             case Argument::Kind::InputBuffer:
             case Argument::Kind::OutputBuffer:
                 // Buffer descriptor
-                type = builder.getIntegerType(32, false);
+                struct BufferDescriptorEntry {
+                    std::string suffix;
+                    mlir::Type type;
+                };
+
+                std::vector<BufferDescriptorEntry> entries;
+                mlir::Type si32 = builder.getIntegerType(32, true);
+
+                for (int i = 0; i < arg.dimensions; i++) {
+                    entries.push_back({"dim_" + std::to_string(i) + "_min", si32});
+                    entries.push_back({"dim_" + std::to_string(i) + "_extent", si32});
+                    entries.push_back({"dim_" + std::to_string(i) + "_stride", si32});
+                }
+
+                for (const auto &entry: entries) {
+                    ports.push_back(circt::hw::PortInfo{builder.getStringAttr(arg.name + "_" + entry.suffix),
+                                    circt::hw::PortDirection::INPUT, entry.type, 0});
+                }
+
+                buffer_arguments.push_back(arg);
                 break;
             }
-
-            ports.push_back(circt::hw::PortInfo{builder.getStringAttr(arg.name), circt::hw::PortDirection::INPUT, type, 0});
         }
 
         // Create module top
@@ -164,7 +185,7 @@ void CodeGen_CIRCT::compile(const Module &input) {
         builder.setInsertionPointToStart(top.getBodyBlock());
 
         // Generate CIRCT MLIR IR
-        CodeGen_CIRCT::Visitor visitor(builder, top);
+        CodeGen_CIRCT::Visitor visitor(builder, top, buffer_arguments);
         f.body.accept(&visitor);
 
         // Module output
@@ -228,13 +249,37 @@ void CodeGen_CIRCT::create_halide_circt_types() {
     //}
 }
 
-CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, circt::hw::HWModuleOp &top)
+CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, circt::hw::HWModuleOp &top, const std::vector<LoweredArgument> &buffer_arguments)
     : builder(builder) {
 
     // Add function arguments to the symbol table
     for (unsigned i = 0; i < top.getNumArguments(); i++) {
         std::string name = top.getArgNames()[i].cast<mlir::StringAttr>().str();
         sym_push(name, top.getArgument(i));
+    }
+
+    // Write buffer descriptor dimensions as an array of structs to facilitate access
+    for (const auto &arg: buffer_arguments) {
+        mlir::Type si32 = builder.getIntegerType(32, true);
+        circt::hw::StructType dim_type = builder.getType<circt::hw::StructType>(mlir::SmallVector({
+            circt::hw::StructType::FieldInfo{builder.getStringAttr("min"), si32},
+            circt::hw::StructType::FieldInfo{builder.getStringAttr("extent"), si32},
+            circt::hw::StructType::FieldInfo{builder.getStringAttr("stride"), si32}
+        }));
+
+        mlir::SmallVector<mlir::Value> array_elements;
+
+        for (int i = 0; i < arg.dimensions; i++) {
+            mlir::SmallVector<mlir::Value> struct_elements;
+
+            for (auto &elem: dim_type.getElements())
+                struct_elements.push_back(sym_get(arg.name + "_dim_" + std::to_string(i) + "_" + elem.name.str()));
+
+            array_elements.push_back(builder.create<circt::hw::StructCreateOp>(dim_type, struct_elements));
+        }
+
+        mlir::Value dim_array = builder.create<circt::hw::ArrayCreateOp>(array_elements);
+        buffers[arg.name] = BufferInfo{dim_array, arg.dimensions};
     }
 }
 
@@ -452,6 +497,13 @@ void CodeGen_CIRCT::Visitor::visit(const Select *op) {
 
 void CodeGen_CIRCT::Visitor::visit(const Load *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(1) << "\tname: " << op->name << "\n";
+
+    mlir::Value predicate = codegen(op->predicate);
+    mlir::Value index = codegen(op->index);
+
+    mlir::Type type = builder.getIntegerType(op->type.bits(), op->type.is_int());
+    value = builder.create<circt::hwarith::ConstantOp>(type, builder.getIntegerAttr(type, 0x1234));
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Ramp *op) {
@@ -490,24 +542,42 @@ void CodeGen_CIRCT::Visitor::visit(const Call *op) {
     } else if(op->name == Call::buffer_get_min) {
         auto name = op->args[0].as<Variable>()->name;
         name = name.substr(0, name.find(".buffer"));
+        int32_t d = op->args[1].as<IntImm>()->value;
         debug(1) << "\t\targ name: " << name << "\n";
         debug(1) << "\t\top bits: " << op->type.bits() << "\n";
-        // TODO: buf->dim[d].min
-        value = builder.create<circt::hwarith::ConstantOp>(type, builder.getIntegerAttr(type, 41));
+        debug(1) << "\t\td: " << d << "\n";
+
+        mlir::Value dim_array = buffers[name].dim_array;
+        mlir::Type index_type = builder.getIntegerType(llvm::Log2_64_Ceil(buffers[name].dim_num));
+        mlir::Value dim_value = builder.create<circt::hw::ConstantOp>(index_type, d);
+        mlir::Value dim_struct = builder.create<circt::hw::ArrayGetOp>(dim_array, dim_value);
+        value = builder.create<circt::hw::StructExtractOp>(dim_struct, builder.getStringAttr("min"));
     } else if(op->name == Call::buffer_get_extent) {
         auto name = op->args[0].as<Variable>()->name;
         name = name.substr(0, name.find(".buffer"));
+        int32_t d = op->args[1].as<IntImm>()->value;
         debug(1) << "\t\targ name: " << name << "\n";
         debug(1) << "\t\top bits: " << op->type.bits() << "\n";
-        // TODO: buf->dim[d].extent
-        value = builder.create<circt::hwarith::ConstantOp>(type, builder.getIntegerAttr(type, 42));
+        debug(1) << "\t\td: " << d << "\n";
+
+        mlir::Value dim_array = buffers[name].dim_array;
+        mlir::Type index_type = builder.getIntegerType(llvm::Log2_64_Ceil(buffers[name].dim_num));
+        mlir::Value dim_value = builder.create<circt::hw::ConstantOp>(index_type, d);
+        mlir::Value dim_struct = builder.create<circt::hw::ArrayGetOp>(dim_array, dim_value);
+        value = builder.create<circt::hw::StructExtractOp>(dim_struct, builder.getStringAttr("extent"));
     } else if(op->name == Call::buffer_get_stride) {
         auto name = op->args[0].as<Variable>()->name;
         name = name.substr(0, name.find(".buffer"));
+        int32_t d = op->args[1].as<IntImm>()->value;
         debug(1) << "\t\targ name: " << name << "\n";
         debug(1) << "\t\top bits: " << op->type.bits() << "\n";
-        // TODO: buf->dim[d].stride
-        value = builder.create<circt::hwarith::ConstantOp>(type, builder.getIntegerAttr(type, 43));
+        debug(1) << "\t\td: " << d << "\n";
+
+        mlir::Value dim_array = buffers[name].dim_array;
+        mlir::Type index_type = builder.getIntegerType(llvm::Log2_64_Ceil(buffers[name].dim_num));
+        mlir::Value dim_value = builder.create<circt::hw::ConstantOp>(index_type, d);
+        mlir::Value dim_struct = builder.create<circt::hw::ArrayGetOp>(dim_array, dim_value);
+        value = builder.create<circt::hw::StructExtractOp>(dim_struct, builder.getStringAttr("stride"));
     } else {
         // Just return 1 for now
         value = builder.create<circt::hwarith::ConstantOp>(type, builder.getIntegerAttr(type, 1));
@@ -600,9 +670,9 @@ void CodeGen_CIRCT::Visitor::visit(const Store *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
     debug(1) << "\tName: " << op->name << "\n";
 
-    //mlir::Value predicate = codegen(op->predicate);
-    //mlir::Value value = codegen(op->value);
-    //mlir::Value index = codegen(op->index);
+    mlir::Value predicate = codegen(op->predicate);
+    mlir::Value value = codegen(op->value);
+    mlir::Value index = codegen(op->index);
 
     // if (predicate) buffer[op->name].store(index, value);
 }
@@ -616,7 +686,14 @@ void CodeGen_CIRCT::Visitor::visit(const Allocate *op) {
 
     int32_t size = op->constant_allocation_size();
 
+    debug(1) << "  name: " << op->name << "\n";
+    debug(1) << "  type: " << op->type << "\n";
+    debug(1) << "  memory_type: " << int(op->memory_type) << "\n";
     debug(1) << "  size: " << size << "\n";
+
+    for (auto &ext: op->extents) {
+        debug(1) << "  ext: " << ext << "\n";
+    }
 
     codegen(op->body);
 }
