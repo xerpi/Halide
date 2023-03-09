@@ -557,35 +557,43 @@ void CodeGen_CIRCT::Visitor::visit(const For *op) {
     debug(1) << "\tForType: " << for_types[unsigned(op->for_type)] << "\n";
 
     mlir::Value clk = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(true));
-    mlir::Value clock_enable = builder.create<circt::sv::LogicOp>(builder.getI1Type(), op->name + "_next");
-    mlir::Value clock_enable_read = builder.create<circt::sv::ReadInOutOp>(clock_enable);
+    clk.getDefiningOp()->setAttr("sv.namehint", builder.getStringAttr(op->name + "_clk"));
+
+    mlir::Value clk_en = builder.create<circt::sv::LogicOp>(builder.getI1Type(), op->name + "_next_en");
+    mlir::Value clk_en_read = builder.create<circt::sv::ReadInOutOp>(clk_en);
+
     mlir::Value reset = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(false));
+    reset.getDefiningOp()->setAttr("sv.namehint", builder.getStringAttr(op->name + "_reset"));
 
     mlir::Value min = codegen(op->min);
-    mlir::Value max = codegen(Add::make(op->min, op->extent));
+    mlir::Value extent = codegen(op->extent);
+    mlir::Value max = builder.create<circt::hwarith::AddOp>(mlir::ValueRange{min, extent});
     mlir::Type type = builder.getIntegerType(max.getType().getIntOrFloatBitWidth());
     mlir::Value min_signless = builder.create<circt::hwarith::CastOp>(type, min);
 
-    mlir::Value iterator_next = builder.create<circt::sv::LogicOp>(type, op->name + "_next_val");
-    mlir::Value iterator_next_read = builder.create<circt::sv::ReadInOutOp>(iterator_next);
-    mlir::Value iterator = builder.create<circt::seq::CompRegClockEnabledOp>(iterator_next_read, clk, clock_enable_read, reset, min_signless, op->name);
-    mlir::Value iterator_with_sign = builder.create<circt::hwarith::CastOp>(max.getType(), iterator);
+    mlir::Value loop_var_next = builder.create<circt::sv::LogicOp>(type, op->name + "_next_val");
+    mlir::Value loop_var_next_read = builder.create<circt::sv::ReadInOutOp>(loop_var_next);
+    mlir::Value loop_var = builder.create<circt::seq::CompRegClockEnabledOp>(loop_var_next_read, clk, clk_en_read, reset, min_signless, op->name);
+    mlir::Value loop_var_with_sign = builder.create<circt::hwarith::CastOp>(max.getType(), loop_var);
 
+    // Increment loop variable by 1
     mlir::Value const_1 = builder.create<circt::hw::ConstantOp>(type, builder.getIntegerAttr(type, 1));
-    mlir::Value iterator_add_1 = builder.create<circt::comb::AddOp>(iterator, const_1);
-    builder.create<circt::sv::AssignOp>(iterator_next, iterator_add_1);
+    mlir::Value loop_var_add_1 = builder.create<circt::comb::AddOp>(loop_var, const_1);
+    builder.create<circt::sv::AssignOp>(loop_var_next, loop_var_add_1);
 
+    // Inner loops will update this signal
     loop_done = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(true));
 
-    sym_push(op->name, iterator_with_sign);
+    sym_push(op->name, loop_var_with_sign);
     codegen(op->body);
     sym_pop(op->name);
 
     // An iteration can advance when: 1) all the inner loops have finished and 2) all memory accesses in the loop body have finished
-    builder.create<circt::sv::AssignOp>(clock_enable, loop_done);
+    builder.create<circt::sv::AssignOp>(clk_en, loop_done);
 
-    mlir::Value max_reached = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq, iterator, to_signless(max));
-    loop_done = builder.create<circt::comb::AndOp>(loop_done, max_reached);
+    // Update signal for outer loops to know this inner loop has finished
+    loop_done = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq, loop_var, to_signless(max));
+    // TODO: loop_done = builder.create<circt::comb::AndOp>(loop_done, mem_accesses_finished);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Store *op) {
