@@ -105,12 +105,18 @@ void CodeGen_CIRCT::compile(const Module &input) {
         mlir::ModuleOp mlir_module = mlir::ModuleOp::create(loc, {});
         mlir::ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
 
+        // Generate module ports (inputs and outputs)
         mlir::SmallVector<circt::hw::PortInfo> ports;
+
+        // Clock and reset signals
+        ports.push_back(circt::hw::PortInfo{builder.getStringAttr("clk"), circt::hw::PortDirection::INPUT, builder.getI1Type(), 0});
+        ports.push_back(circt::hw::PortInfo{builder.getStringAttr("reset"), circt::hw::PortDirection::INPUT, builder.getI1Type(), 0});
+
+        // Convert function arguments to module ports
         //std::vector<LoweredArgument> scalar_arguments;
         std::vector<LoweredArgument> buffer_arguments;
-
-        // Convert function arguments to module ports (inputs and outputs)
         debug(1) << "\tArg count: " << f.args.size() << "\n";
+
         for (const auto &arg: f.args) {
             static const char *const kind_names[] = {
                 "halide_argument_kind_input_scalar",
@@ -155,7 +161,6 @@ void CodeGen_CIRCT::compile(const Module &input) {
                 break;
             case Argument::Kind::InputBuffer:
             case Argument::Kind::OutputBuffer:
-                // Buffer descriptor
                 struct BufferDescriptorEntry {
                     std::string suffix;
                     mlir::Type type;
@@ -163,7 +168,12 @@ void CodeGen_CIRCT::compile(const Module &input) {
 
                 std::vector<BufferDescriptorEntry> entries;
                 mlir::Type si32 = builder.getIntegerType(32, true);
+                mlir::Type ui64 = builder.getIntegerType(64, false);
 
+                // Address (offset of the buffer into the AXI4 master interface)
+                entries.push_back({"addr", ui64});
+
+                // Buffer dimensions
                 for (int i = 0; i < arg.dimensions; i++) {
                     entries.push_back({"dim_" + std::to_string(i) + "_min", si32});
                     entries.push_back({"dim_" + std::to_string(i) + "_extent", si32});
@@ -178,6 +188,11 @@ void CodeGen_CIRCT::compile(const Module &input) {
                 buffer_arguments.push_back(arg);
                 break;
             }
+        }
+
+        // For each buffer argument, we use a different AXI4 master interface (up to 16), named [m00_axi, ..., m16_axi]
+        for (size_t i = 0; i < buffer_arguments.size(); i++) {
+
         }
 
         // Create module top
