@@ -84,6 +84,9 @@ protected:
         void visit(const Acquire *) override;
         void visit(const Atomic *) override;
 
+        template<typename T, typename CirctOp>
+        void visit_and_or(const T *);
+
         void sym_push(const std::string &name, mlir::Value value);
         void sym_pop(const std::string &name);
         mlir::Value sym_get(const std::string &name, bool must_succeed = true) const;
@@ -99,12 +102,6 @@ protected:
         mlir::Value value;
         mlir::Value loop_done;
         Scope<mlir::Value> symbol_table;
-
-        struct BufferInfo {
-            mlir::Value dim_array;
-            int dim_num;
-        };
-        std::map<std::string, BufferInfo> buffers;
     };
 
 private:
