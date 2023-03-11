@@ -37,73 +37,21 @@ CodeGen_CIRCT::CodeGen_CIRCT() {
     mlir_context.loadDialect<circt::hwarith::HWArithDialect>();
     mlir_context.loadDialect<circt::seq::SeqDialect>();
     mlir_context.loadDialect<circt::sv::SVDialect>();
-    create_halide_circt_types();
 }
 
 void CodeGen_CIRCT::compile(const Module &input) {
-    //init_codegen(input.name(), input.any_strict_float());
-
-    // Generate the code for this module.
     debug(1) << "Generating CIRCT MLIR IR...\n";
 
     circt::LoweringOptions opts;
     opts.emittedLineLength = 200;
-
-    //for (const auto &b : input.buffers()) {
-        //compile_buffer(b);
-    //}
-
-    //vector<MangledNames> function_names;
-
-    // Declare all functions
-#if 0
-    for (const auto &f : input.functions()) {
-        const auto names = get_mangled_names(f, get_target());
-        function_names.push_back(names);
-
-        // Deduce the types of the arguments to our function
-        vector<llvm::Type *> arg_types(f.args.size());
-        for (size_t i = 0; i < f.args.size(); i++) {
-            if (f.args[i].is_buffer()) {
-                arg_types[i] = halide_buffer_t_type->getPointerTo();
-            } else {
-                arg_types[i] = llvm_type_of(upgrade_type_for_argument_passing(f.args[i].type));
-            }
-        }
-        FunctionType *func_t = FunctionType::get(i32_t, arg_types, false);
-        function = llvm::Function::Create(func_t, llvm_linkage(f.linkage), names.extern_name, module.get());
-        set_function_attributes_from_halide_target_options(*function);
-
-        // Mark the buffer args as no alias and save indication for add_argv_wrapper if needed
-        std::vector<bool> buffer_args(f.args.size());
-        for (size_t i = 0; i < f.args.size(); i++) {
-            bool is_buffer = f.args[i].is_buffer();
-            buffer_args[i] = is_buffer;
-            if (is_buffer) {
-                function->addParamAttr(i, Attribute::NoAlias);
-            }
-        }
-
-        // sym_push helpfully calls setName, which we don't want
-        symbol_table.push("::" + f.name, function);
-
-        // If the Func is externally visible, also create the argv wrapper and metadata.
-        // (useful for calling from JIT and other machine interfaces).
-        if (f.linkage == LinkageType::ExternalPlusArgv || f.linkage == LinkageType::ExternalPlusMetadata) {
-            add_argv_wrapper(function, names.argv_name, false, buffer_args);
-            if (f.linkage == LinkageType::ExternalPlusMetadata) {
-                embed_metadata_getter(names.metadata_name,
-                                      names.simple_name, f.args, input.get_metadata_name_map());
-            }
-        }
-    }
-#endif
+    opts.disallowPortDeclSharing = true;
+    opts.printDebugInfo = true;
+    opts.wireSpillingNamehintTermLimit = 1000;
+    opts.maximumNumberOfTermsPerExpression = 1000;
+    opts.emitBindComments = true;
 
     // Translate each function into a CIRCT HWModuleOp
     for (const auto &f : input.functions()) {
-        /*run_with_large_stack([&]() {
-            compile_func(f, names.simple_name, names.extern_name);
-        });*/
 
         std::cout << "Generating CIRCT MLIR IR for function " << f.name << std::endl;
 
@@ -199,7 +147,33 @@ void CodeGen_CIRCT::compile(const Module &input) {
 
         // For each buffer argument, we use a different AXI4 master interface (up to 16), named [m00_axi, ..., m16_axi]
         for (size_t i = 0; i < buffer_arguments.size(); i++) {
+            const std::vector<std::tuple<std::string, mlir::Type, circt::hw::PortDirection>> axi_signals = {
+                {"awvalid", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+                {"awready", builder.getI1Type(), circt::hw::PortDirection::INPUT},
+                {"awaddr",  builder.getI64Type(), circt::hw::PortDirection::OUTPUT},
+                {"awlen",   builder.getI8Type(), circt::hw::PortDirection::OUTPUT},
+                {"wvalid",  builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+                {"wready",  builder.getI1Type(), circt::hw::PortDirection::INPUT},
+                {"wdata",   builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+                {"wstrb",   builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+                {"wlast",   builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+                {"bvalid",  builder.getI1Type(), circt::hw::PortDirection::INPUT},
+                {"bready",  builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+                {"arvalid", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+                {"arready", builder.getI1Type(), circt::hw::PortDirection::INPUT},
+                {"araddr",  builder.getI64Type(), circt::hw::PortDirection::OUTPUT},
+                {"arlen",   builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+                {"rvalid",  builder.getI1Type(), circt::hw::PortDirection::INPUT},
+                {"rready",  builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+                {"rdata",   builder.getI1Type(), circt::hw::PortDirection::INPUT},
+                {"rlast",   builder.getI1Type(), circt::hw::PortDirection::INPUT},
+            };
 
+            for (const auto &signal: axi_signals) {
+                ports.push_back(circt::hw::PortInfo{builder.getStringAttr("m" + std::string(i < 10 ? "0" : "") +
+                                                    std::to_string(i) + "_" + std::get<0>(signal)),
+                                                    std::get<2>(signal), std::get<1>(signal)});
+            }
         }
 
         // Create module top
@@ -209,11 +183,6 @@ void CodeGen_CIRCT::compile(const Module &input) {
         // Generate CIRCT MLIR IR
         CodeGen_CIRCT::Visitor visitor(builder, top, buffer_arguments);
         f.body.accept(&visitor);
-
-        // Module output
-        //circt::hw::ConstantOp c0 = builder.create<circt::hw::ConstantOp>(builder.getIntegerType(32, true), 42);
-        //auto outputOp = top.getBodyBlock()->getTerminator();
-        //outputOp->setOperands(mlir::ValueRange{c0});
 
         // Print MLIR before running passes
         std::cout << "Original MLIR" << std::endl;
@@ -230,14 +199,11 @@ void CodeGen_CIRCT::compile(const Module &input) {
         pm.addPass(circt::createHWArithToHWPass());
         pm.addPass(circt::seq::createSeqLowerToSVPass());
         pm.nest<circt::hw::HWModuleOp>().addPass(circt::sv::createHWCleanupPass());
-        // Legalize unsupported operations within the modules.
         pm.nest<circt::hw::HWModuleOp>().addPass(circt::sv::createHWLegalizeModulesPass());
-        // Tidy up the IR to improve verilog emission quality.
         auto &modulePM = pm.nest<circt::hw::HWModuleOp>();
         modulePM.addPass(circt::sv::createPrettifyVerilogPass());
 
         auto pmRunResult = pm.run(mlir_module);
-
         std::cout << "Run passes result: " << pmRunResult.succeeded() << std::endl;
         std::cout << "Module inputs: " << top.getNumInputs() << ", outputs: " << top.getNumOutputs() << std::endl;
 
@@ -264,14 +230,6 @@ void CodeGen_CIRCT::compile(const Module &input) {
         file << str;
         file.close();
     }
-
-    //debug(2) << "llvm::Module pointer: " << module.get() << "\n";
-}
-
-void CodeGen_CIRCT::create_halide_circt_types() {
-    //if (std::is_same<decltype(halide_buffer_t::)::element_type, int>::value) {
-
-    //}
 }
 
 CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, circt::hw::HWModuleOp &top, const std::vector<LoweredArgument> &buffer_arguments)
@@ -282,6 +240,22 @@ CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, circt::hw::
         std::string name = top.getArgNames()[i].cast<mlir::StringAttr>().str();
         sym_push(name, top.getArgument(i));
     }
+
+    // Outputs
+    mlir::SmallVector<mlir::Value> results;
+    for (unsigned i = 0; i < top.getNumResults(); i++) {
+        std::string name = top.getResultNames()[i].cast<mlir::StringAttr>().str();
+        mlir::Type type = top.getResultTypes()[i];
+        debug(1) << "RESULT: " << name << "\n";
+        mlir::Value wire = builder.create<circt::sv::WireOp>(type);
+        mlir::Value rdata = builder.create<circt::sv::ReadInOutOp>(wire);
+        sym_push(name, rdata);
+        results.push_back(rdata);
+    }
+
+    // Set module output operands
+    auto outputOp = top.getBodyBlock()->getTerminator();
+    outputOp->setOperands(results);
 
     // Create buffer type to facilitate access
     for (const auto &buf: buffer_arguments) {
@@ -647,9 +621,14 @@ void CodeGen_CIRCT::Visitor::visit(const Store *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
     debug(1) << "\tName: " << op->name << "\n";
 
-    mlir::Value predicate = codegen(op->predicate);
+    //mlir::Value predicate = codegen(op->predicate);
     mlir::Value value = codegen(op->value);
     mlir::Value index = codegen(op->index);
+
+    // TODO: Use shift instead of multiplication
+    mlir::Value element_size = builder.create<circt::hw::ConstantOp>(builder.getI32IntegerAttr(value.getType().getIntOrFloatBitWidth()));
+    mlir::Value offset = builder.create<circt::comb::MulOp>(to_signless(index), element_size);
+
 
     // if (predicate) buffer[op->name].store(index, value);
 }

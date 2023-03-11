@@ -105,8 +105,6 @@ protected:
     };
 
 private:
-    void create_halide_circt_types();
-
     mlir::MLIRContext mlir_context;
 };
 
