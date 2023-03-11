@@ -15,6 +15,7 @@
 #include <circt/Dialect/SV/SVDialect.h>
 #include <circt/Dialect/SV/SVOps.h>
 #include <circt/Dialect/SV/SVPasses.h>
+#include <circt/Support/LoweringOptions.h>
 
 #include <mlir/IR/Verifier.h>
 #include <mlir/Pass/PassManager.h>
@@ -44,6 +45,10 @@ void CodeGen_CIRCT::compile(const Module &input) {
 
     // Generate the code for this module.
     debug(1) << "Generating CIRCT MLIR IR...\n";
+
+    circt::LoweringOptions opts;
+    opts.emittedLineLength = 200;
+
     //for (const auto &b : input.buffers()) {
         //compile_buffer(b);
     //}
@@ -104,6 +109,7 @@ void CodeGen_CIRCT::compile(const Module &input) {
 
         mlir::LocationAttr loc = mlir::UnknownLoc::get(&mlir_context);
         mlir::ModuleOp mlir_module = mlir::ModuleOp::create(loc, {});
+        opts.setAsAttribute(mlir_module);
         mlir::ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
 
         // Generate module ports (inputs and outputs)
