@@ -123,10 +123,12 @@ void CodeGen_CIRCT::compile(const Module &input) {
 
                 std::vector<BufferDescriptorEntry> entries;
                 mlir::Type si32 = builder.getIntegerType(32, true);
-                mlir::Type ui64 = builder.getIntegerType(64, false);
+                mlir::Type ui64 = builder.getIntegerType(64, true);
 
-                // Address (offset of the buffer into the AXI4 master interface)
-                entries.push_back({"addr", ui64});
+                // A pointer to the start of the data in main memory (offset of the buffer into the AXI4 master interface)
+                entries.push_back({"host", ui64});
+                // The dimensionality of the buffer
+                entries.push_back({"dimensions", si32});
 
                 // Buffer dimensions
                 for (int i = 0; i < arg.dimensions; i++) {
@@ -260,6 +262,7 @@ CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, circt::hw::
     // Create buffer type to facilitate access
     for (const auto &buf: buffer_arguments) {
         mlir::Type si32 = builder.getIntegerType(32, true);
+        mlir::Type ui64 = builder.getIntegerType(64, true);
         circt::hw::StructType dim_type = builder.getType<circt::hw::StructType>(mlir::SmallVector({
             circt::hw::StructType::FieldInfo{builder.getStringAttr("min"), si32},
             circt::hw::StructType::FieldInfo{builder.getStringAttr("extent"), si32},
@@ -267,24 +270,23 @@ CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, circt::hw::
         }));
         circt::hw::ArrayType dim_array_type = circt::hw::ArrayType::get(dim_type, buf.dimensions);
         circt::hw::StructType buf_type  = builder.getType<circt::hw::StructType>(mlir::SmallVector({
+            circt::hw::StructType::FieldInfo{builder.getStringAttr("host"), ui64},
             circt::hw::StructType::FieldInfo{builder.getStringAttr("dimensions"), si32},
             circt::hw::StructType::FieldInfo{builder.getStringAttr("dim"), dim_array_type},
         }));
 
-        mlir::SmallVector<mlir::Value> array_elements;
-
+        mlir::SmallVector<mlir::Value> dim_array_elements;
         for (int i = 0; i < buf.dimensions; i++) {
             mlir::SmallVector<mlir::Value> struct_elements;
-
             for (auto &elem: dim_type.getElements())
                 struct_elements.push_back(sym_get(buf.name + "_dim_" + std::to_string(i) + "_" + elem.name.str()));
 
-            array_elements.push_back(builder.create<circt::hw::StructCreateOp>(dim_type, struct_elements));
+            dim_array_elements.push_back(builder.create<circt::hw::StructCreateOp>(dim_type, struct_elements));
         }
-
-        mlir::Value dimensions = builder.create<circt::hwarith::ConstantOp>(si32, builder.getSI32IntegerAttr(buf.dimensions));
-        mlir::Value dim = builder.create<circt::hw::ArrayCreateOp>(dim_array_type, array_elements);
-        mlir::Value buffer =  builder.create<circt::hw::StructCreateOp>(buf_type, mlir::ValueRange({dimensions, dim}));
+        mlir::Value host = sym_get(buf.name + "_host");
+        mlir::Value dimensions = sym_get(buf.name + "_dimensions");
+        mlir::Value dim = builder.create<circt::hw::ArrayCreateOp>(dim_array_type, dim_array_elements);
+        mlir::Value buffer =  builder.create<circt::hw::StructCreateOp>(buf_type, mlir::ValueRange({host, dimensions, dim}));
         sym_push(buf.name + ".buffer", buffer);
     }
 }
@@ -524,7 +526,7 @@ void CodeGen_CIRCT::Visitor::visit(const Call *op) {
     };
 
     if (op->name == Call::buffer_get_host) {
-        value = builder.create<circt::hwarith::ConstantOp>(op_type, builder.getIntegerAttr(op_type, 1));
+        value = builder.create<circt::hw::StructExtractOp>(codegen(op->args[0]), builder.getStringAttr("host"));
     } else if (op->name == Call::buffer_is_bounds_query) {
         value = builder.create<circt::hwarith::ConstantOp>(op_type, builder.getIntegerAttr(op_type, 1));
     } else if(op->name == Call::buffer_get_min) {
@@ -624,11 +626,14 @@ void CodeGen_CIRCT::Visitor::visit(const Store *op) {
     //mlir::Value predicate = codegen(op->predicate);
     mlir::Value value = codegen(op->value);
     mlir::Value index = codegen(op->index);
+    mlir::Value base = sym_get(op->name);
 
     // TODO: Use shift instead of multiplication
-    mlir::Value element_size = builder.create<circt::hw::ConstantOp>(builder.getI32IntegerAttr(value.getType().getIntOrFloatBitWidth()));
-    mlir::Value offset = builder.create<circt::comb::MulOp>(to_signless(index), element_size);
-
+    uint32_t element_size_bytes = (value.getType().getIntOrFloatBitWidth() + 7) / 8;
+    mlir::Value element_size = builder.create<circt::hwarith::ConstantOp>(builder.getIntegerType(32, false),
+                                                                          builder.getUI32IntegerAttr(element_size_bytes));
+    mlir::Value offset = builder.create<circt::hwarith::MulOp>(mlir::ValueRange{index, element_size});
+    mlir::Value addr = builder.create<circt::hwarith::AddOp>(mlir::ValueRange{base, truncate_int(offset, 64)});
 
     // if (predicate) buffer[op->name].store(index, value);
 }
