@@ -260,6 +260,7 @@ CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, circt::hw::
     outputOp->setOperands(results);
 
     // Create buffer type to facilitate access
+    int axi_interface = 0;
     for (const auto &buf: buffer_arguments) {
         mlir::Type si32 = builder.getIntegerType(32, true);
         mlir::Type ui64 = builder.getIntegerType(64, true);
@@ -286,8 +287,15 @@ CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, circt::hw::
         mlir::Value host = sym_get(buf.name + "_host");
         mlir::Value dimensions = sym_get(buf.name + "_dimensions");
         mlir::Value dim = builder.create<circt::hw::ArrayCreateOp>(dim_array_type, dim_array_elements);
-        mlir::Value buffer =  builder.create<circt::hw::StructCreateOp>(buf_type, mlir::ValueRange({host, dimensions, dim}));
+
+        llvm::SmallVector<mlir::NamedAttribute> attributes = {
+            mlir::NamedAttribute(builder.getStringAttr("axi_interface"), builder.getI32IntegerAttr(axi_interface)),
+        };
+
+        mlir::Value buffer = builder.create<circt::hw::StructCreateOp>(buf_type, mlir::ValueRange({host, dimensions, dim}), attributes);
         sym_push(buf.name + ".buffer", buffer);
+
+        axi_interface++;
     }
 }
 
@@ -526,7 +534,10 @@ void CodeGen_CIRCT::Visitor::visit(const Call *op) {
     };
 
     if (op->name == Call::buffer_get_host) {
-        value = builder.create<circt::hw::StructExtractOp>(codegen(op->args[0]), builder.getStringAttr("host"));
+        mlir::Value buf = codegen(op->args[0]);
+        mlir::Attribute axi_interface = buf.getDefiningOp()->getAttr("axi_interface");
+        value = builder.create<circt::hw::StructExtractOp>(buf, builder.getStringAttr("host"));
+        value.getDefiningOp()->setAttr(builder.getStringAttr("axi_interface"), axi_interface);
     } else if (op->name == Call::buffer_is_bounds_query) {
         value = builder.create<circt::hwarith::ConstantOp>(op_type, builder.getIntegerAttr(op_type, 1));
     } else if(op->name == Call::buffer_get_min) {
@@ -626,14 +637,16 @@ void CodeGen_CIRCT::Visitor::visit(const Store *op) {
     //mlir::Value predicate = codegen(op->predicate);
     mlir::Value value = codegen(op->value);
     mlir::Value index = codegen(op->index);
-    mlir::Value base = sym_get(op->name);
+    mlir::Value buf = sym_get(op->name);
+    int axi_interface = buf.getDefiningOp()->getAttrOfType<mlir::IntegerAttr>("axi_interface").getInt();
+    debug(1) << "\taxi_interface: " << axi_interface << "\n";
 
     // TODO: Use shift instead of multiplication
     uint32_t element_size_bytes = (value.getType().getIntOrFloatBitWidth() + 7) / 8;
     mlir::Value element_size = builder.create<circt::hwarith::ConstantOp>(builder.getIntegerType(32, false),
                                                                           builder.getUI32IntegerAttr(element_size_bytes));
     mlir::Value offset = builder.create<circt::hwarith::MulOp>(mlir::ValueRange{index, element_size});
-    mlir::Value addr = builder.create<circt::hwarith::AddOp>(mlir::ValueRange{base, truncate_int(offset, 64)});
+    mlir::Value addr = builder.create<circt::hwarith::AddOp>(mlir::ValueRange{buf, truncate_int(offset, 64)});
 
     // if (predicate) buffer[op->name].store(index, value);
 }
