@@ -2,9 +2,12 @@
 #include <vector>
 
 #include <circt/Conversion/ExportVerilog.h>
+#include <circt/Conversion/FSMToSV.h>
 #include <circt/Conversion/HWArithToHW.h>
 #include <circt/Dialect/Comb/CombDialect.h>
 #include <circt/Dialect/Comb/CombOps.h>
+#include <circt/Dialect/FSM/FSMDialect.h>
+#include <circt/Dialect/FSM/FSMOps.h>
 #include <circt/Dialect/HW/HWDialect.h>
 #include <circt/Dialect/HW/HWOps.h>
 #include <circt/Dialect/HWArith/HWArithDialect.h>
@@ -33,6 +36,7 @@ namespace Internal {
 
 CodeGen_CIRCT::CodeGen_CIRCT() {
     mlir_context.loadDialect<circt::comb::CombDialect>();
+    mlir_context.loadDialect<circt::fsm::FSMDialect>();
     mlir_context.loadDialect<circt::hw::HWDialect>();
     mlir_context.loadDialect<circt::hwarith::HWArithDialect>();
     mlir_context.loadDialect<circt::seq::SeqDialect>();
@@ -190,6 +194,11 @@ void CodeGen_CIRCT::compile(const Module &input) {
         std::cout << "Original MLIR" << std::endl;
         mlir_module.dump();
 
+        debug(1) << "fsms: " << "\n";
+        for (auto machine: top.getOps<circt::fsm::MachineOp>()) {
+            debug(1) << "Got FSM!\n";
+        }
+
         // Verify module (before running passes)
         auto moduleVerifyResult = mlir::verify(mlir_module);
         std::cout << "Module verify (before passess) result: " << moduleVerifyResult.succeeded() << std::endl;
@@ -199,6 +208,7 @@ void CodeGen_CIRCT::compile(const Module &input) {
         std::cout << "Running passes." << std::endl;
         mlir::PassManager pm(mlir_module.getContext());
         pm.addPass(circt::createHWArithToHWPass());
+        pm.addPass(circt::createConvertFSMToSVPass());
         pm.addPass(circt::seq::createSeqLowerToSVPass());
         pm.nest<circt::hw::HWModuleOp>().addPass(circt::sv::createHWCleanupPass());
         pm.nest<circt::hw::HWModuleOp>().addPass(circt::sv::createHWLegalizeModulesPass());
@@ -244,7 +254,7 @@ CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, circt::hw::
     }
 
     // Outputs
-    mlir::SmallVector<mlir::Value> results;
+    mlir::SmallVector<mlir::Value> outputs;
     for (unsigned i = 0; i < top.getNumResults(); i++) {
         std::string name = top.getResultNames()[i].cast<mlir::StringAttr>().str();
         mlir::Type type = top.getResultTypes()[i];
@@ -252,12 +262,12 @@ CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, circt::hw::
         mlir::Value wire = builder.create<circt::sv::WireOp>(type);
         mlir::Value rdata = builder.create<circt::sv::ReadInOutOp>(wire);
         sym_push(name, rdata);
-        results.push_back(rdata);
+        outputs.push_back(rdata);
     }
 
     // Set module output operands
     auto outputOp = top.getBodyBlock()->getTerminator();
-    outputOp->setOperands(results);
+    outputOp->setOperands(outputs);
 
     // Create buffer type to facilitate access
     int axi_interface = 0;
@@ -296,6 +306,34 @@ CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, circt::hw::
         sym_push(buf.name + ".buffer", buffer);
 
         axi_interface++;
+    }
+
+    // Create MemAccessFSM machine definition
+    {
+        mlir::SmallVector<mlir::Type> inputs{builder.getI1Type()};
+        mlir::SmallVector<mlir::Type> results{builder.getI1Type()};
+        mlir::FunctionType function_type = builder.getFunctionType(inputs, results);
+        MemAccessFSM = builder.create<circt::fsm::MachineOp>("MemAccessFSM", "WAIT", function_type);
+        mlir::Region &fsm_body = MemAccessFSM.getBody();
+        mlir::ImplicitLocOpBuilder fsm_builder = mlir::ImplicitLocOpBuilder::atBlockEnd(fsm_body.getLoc(), &fsm_body.front());
+
+        circt::fsm::StateOp wait_state = fsm_builder.create<circt::fsm::StateOp>("WAIT");
+        {
+            mlir::Region &output = wait_state.getOutput();
+            mlir::ImplicitLocOpBuilder output_builder = mlir::ImplicitLocOpBuilder::atBlockBegin(output.getLoc(), &output.front());
+            {
+                mlir::Value b = output_builder.create<circt::hw::ConstantOp>(output_builder.getBoolAttr(true));
+                wait_state.getOutputOp()->setOperands(mlir::ValueRange{b});
+            }
+            mlir::Region &transitions = wait_state.getTransitions();
+            mlir::ImplicitLocOpBuilder transitions_builder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
+            {
+
+            }
+        }
+        /*fsm_builder.create<circt::fsm::StateOp>("READY");
+        fsm_builder.create<circt::fsm::StateOp>("BUSY");
+        fsm_builder.create<circt::fsm::StateOp>("DONE");*/
     }
 }
 
@@ -564,12 +602,9 @@ void CodeGen_CIRCT::Visitor::visit(const LetStmt *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
     debug(1) << "Contents:" << "\n";
     debug(1) << "\tName: " << op->name << "\n";
-    debug(1) << "\tValue: " << op->value << "\n";
-    debug(1) << "\tBody: " << op->body << "\n";
     sym_push(op->name, codegen(op->value));
     codegen(op->body);
     sym_pop(op->name);
-    debug(1) << __PRETTY_FUNCTION__ << " finished!\n";
 }
 
 void CodeGen_CIRCT::Visitor::visit(const AssertStmt *op) {
@@ -648,6 +683,8 @@ void CodeGen_CIRCT::Visitor::visit(const Store *op) {
     mlir::Value offset = builder.create<circt::hwarith::MulOp>(mlir::ValueRange{index, element_size});
     mlir::Value addr = builder.create<circt::hwarith::AddOp>(mlir::ValueRange{buf, truncate_int(offset, 64)});
 
+    // circt::fsm::HWInstanceOp
+
     // if (predicate) buffer[op->name].store(index, value);
 }
 
@@ -723,7 +760,7 @@ void CodeGen_CIRCT::Visitor::visit(const Evaluate *op) {
     codegen(op->value);
 
     // Discard result
-    //value = nullptr;
+    value = mlir::Value();
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Shuffle *op) {
@@ -762,8 +799,7 @@ void CodeGen_CIRCT::Visitor::visit_and_or(const T *op) {
 }
 
 void CodeGen_CIRCT::Visitor::sym_push(const std::string &name, mlir::Value value) {
-    //mlir::NameLoc::get(StringAttr::get(unwrap(context), unwrap(name))));
-    //value.setLoc(mlir::NameLoc::get(builder.getStringAttr(name)));
+    //value.getDefiningOp()->setAttr("sv.namehint", builder.getStringAttr(name));
     symbol_table.push(name, value);
 }
 

@@ -7,6 +7,7 @@
 
 #include <string>
 
+#include <circt/Dialect/FSM/FSMOps.h>
 #include <circt/Dialect/HW/HWOps.h>
 
 #include <mlir/IR/BuiltinOps.h>
@@ -101,6 +102,7 @@ protected:
         mlir::ImplicitLocOpBuilder &builder;
         mlir::Value value;
         mlir::Value loop_done;
+        circt::fsm::MachineOp MemAccessFSM;
         Scope<mlir::Value> symbol_table;
     };
 

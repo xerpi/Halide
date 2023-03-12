@@ -139,6 +139,8 @@ if (TARGET_CIRCT AND CIRCT_FOUND)
     target_link_libraries(Halide_LLVM INTERFACE
                           CIRCTComb
                           CIRCTExportVerilog
+                          CIRCTFSM
+                          CIRCTFSMToSV
                           CIRCTHW
                           CIRCTHWArith
                           CIRCTHWArithToHW
