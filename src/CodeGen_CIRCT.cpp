@@ -114,47 +114,81 @@ void CodeGen_CIRCT::compile(const Module &input) {
 void CodeGen_CIRCT::create_circt_definitions(CirctGlobalTypes &globalTypes, mlir::ImplicitLocOpBuilder &builder) {
     // Create MemAccessFSM machine definition
     {
-        mlir::SmallVector<mlir::Type> inputs{builder.getI1Type()};
-        mlir::SmallVector<mlir::Type> results{builder.getI1Type()};
+        // Inputs: {enable, mem_access_started, mem_access_finished}
+        mlir::SmallVector<mlir::Type> inputs{builder.getI1Type(), builder.getI1Type(), builder.getI1Type()};
+        // Outputs: {valid, done}
+        mlir::SmallVector<mlir::Type> results{builder.getI1Type(), builder.getI1Type()};
         mlir::FunctionType function_type = builder.getFunctionType(inputs, results);
-        globalTypes.memAccessFSM = builder.create<circt::fsm::MachineOp>("MemAccessFSM", "WAIT", function_type);
+        globalTypes.memAccessFSM = builder.create<circt::fsm::MachineOp>("MemAccessFSM", "IDLE", function_type);
+        mlir::ArrayAttr argNames = builder.getArrayAttr({builder.getStringAttr("enable"),
+                                                         builder.getStringAttr("mem_access_started"),
+                                                         builder.getStringAttr("mem_access_finished")});
+        globalTypes.memAccessFSM.setArgNamesAttr(argNames);
+        mlir::ArrayAttr resNames = builder.getArrayAttr({builder.getStringAttr("valid"),
+                                                         builder.getStringAttr("done")});
+        globalTypes.memAccessFSM.setResNamesAttr(resNames);
         mlir::Region &fsm_body = globalTypes.memAccessFSM.getBody();
         mlir::ImplicitLocOpBuilder fsm_builder = mlir::ImplicitLocOpBuilder::atBlockEnd(fsm_body.getLoc(), &fsm_body.front());
+        mlir::Value val0 = fsm_builder.create<circt::hw::ConstantOp>(fsm_builder.getBoolAttr(false));
+        mlir::Value val1 = fsm_builder.create<circt::hw::ConstantOp>(fsm_builder.getBoolAttr(true));
 
-        circt::fsm::StateOp wait_state = fsm_builder.create<circt::fsm::StateOp>("WAIT");
+        circt::fsm::StateOp idle_state = fsm_builder.create<circt::fsm::StateOp>("IDLE");
         {
-            mlir::Region &output = wait_state.getOutput();
-            mlir::ImplicitLocOpBuilder output_builder = mlir::ImplicitLocOpBuilder::atBlockBegin(output.getLoc(), &output.front());
             {
-                mlir::Value b = output_builder.create<circt::hw::ConstantOp>(output_builder.getBoolAttr(true));
-                wait_state.getOutputOp()->setOperands(mlir::ValueRange{b});
+                idle_state.getOutputOp()->setOperands(mlir::ValueRange{val0, val0});
             }
-            mlir::Region &transitions = wait_state.getTransitions();
+            mlir::Region &transitions = idle_state.getTransitions();
             mlir::ImplicitLocOpBuilder transitions_builder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
             {
-
+                circt::fsm::TransitionOp transition = transitions_builder.create<circt::fsm::TransitionOp>("READY");
+                transition.ensureGuard(transitions_builder);
+                circt::fsm::ReturnOp returnOp = transition.getGuardReturn();
+                returnOp.setOperand(globalTypes.memAccessFSM.getArgument(0));
             }
         }
         circt::fsm::StateOp ready_state = fsm_builder.create<circt::fsm::StateOp>("READY");
         {
-            mlir::Region &output = ready_state.getOutput();
-            mlir::ImplicitLocOpBuilder output_builder = mlir::ImplicitLocOpBuilder::atBlockBegin(output.getLoc(), &output.front());
             {
-                mlir::Value b = output_builder.create<circt::hw::ConstantOp>(output_builder.getBoolAttr(true));
-                ready_state.getOutputOp()->setOperands(mlir::ValueRange{b});
+                ready_state.getOutputOp()->setOperands(mlir::ValueRange{val1, val0});
             }
             mlir::Region &transitions = ready_state.getTransitions();
             mlir::ImplicitLocOpBuilder transitions_builder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
             {
-
+                circt::fsm::TransitionOp transition = transitions_builder.create<circt::fsm::TransitionOp>("BUSY");
+                transition.ensureGuard(transitions_builder);
+                circt::fsm::ReturnOp returnOp = transition.getGuardReturn();
+                returnOp.setOperand(globalTypes.memAccessFSM.getArgument(1));
             }
         }
-        //fsm_builder.create<circt::fsm::StateOp>("BUSY");
-        //fsm_builder.create<circt::fsm::StateOp>("DONE");
+        circt::fsm::StateOp busy_state = fsm_builder.create<circt::fsm::StateOp>("BUSY");
+        {
+            {
+                busy_state.getOutputOp()->setOperands(mlir::ValueRange{val0, val0});
+            }
+            mlir::Region &transitions = busy_state.getTransitions();
+            mlir::ImplicitLocOpBuilder transitions_builder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
+            {
+                circt::fsm::TransitionOp transition = transitions_builder.create<circt::fsm::TransitionOp>("DONE");
+                transition.ensureGuard(transitions_builder);
+                circt::fsm::ReturnOp returnOp = transition.getGuardReturn();
+                returnOp.setOperand(globalTypes.memAccessFSM.getArgument(2));
+            }
+        }
+        circt::fsm::StateOp done_state = fsm_builder.create<circt::fsm::StateOp>("DONE");
+        {
+            {
+                done_state.getOutputOp()->setOperands(mlir::ValueRange{val0, val1});
+            }
+            mlir::Region &transitions = done_state.getTransitions();
+            mlir::ImplicitLocOpBuilder transitions_builder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
+            {
+                transitions_builder.create<circt::fsm::TransitionOp>("IDLE");
+            }
+        }
     }
 }
 
-CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, const CirctGlobalTypes &globalTypes, const Internal::LoweredFunc &function)
+CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, CirctGlobalTypes &globalTypes, const Internal::LoweredFunc &function)
     : builder(builder), globalTypes(globalTypes) {
     // Generate module ports (inputs and outputs)
     mlir::SmallVector<circt::hw::PortInfo> ports;
@@ -685,7 +719,12 @@ void CodeGen_CIRCT::Visitor::visit(const Store *op) {
     mlir::Value offset = builder.create<circt::hwarith::MulOp>(mlir::ValueRange{index, element_size});
     mlir::Value addr = builder.create<circt::hwarith::AddOp>(mlir::ValueRange{buf, truncate_int(offset, 64)});
 
-    // circt::fsm::HWInstanceOp
+    mlir::TypeRange outputs = globalTypes.memAccessFSM.getFunctionType().getResults();
+    mlir::Value foo = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(false));
+    circt::fsm::HWInstanceOp fsmInstance = builder.create<circt::fsm::HWInstanceOp>(outputs, op->name,
+                                                                                    globalTypes.memAccessFSM.getSymName(),
+                                                                                    mlir::ValueRange({foo, foo, foo}),
+                                                                                    sym_get("clk"), sym_get("reset"));
 
     // if (predicate) buffer[op->name].store(index, value);
 }

@@ -35,7 +35,7 @@ protected:
 
     class Visitor : public IRVisitor {
     public:
-        Visitor(mlir::ImplicitLocOpBuilder &builder, const CirctGlobalTypes &globalTypes, const Internal::LoweredFunc &function);
+        Visitor(mlir::ImplicitLocOpBuilder &builder, CirctGlobalTypes &globalTypes, const Internal::LoweredFunc &function);
 
     protected:
         mlir::Value codegen(const Expr &);
@@ -104,7 +104,7 @@ protected:
 
     private:
         mlir::ImplicitLocOpBuilder &builder;
-        const CirctGlobalTypes &globalTypes;
+        CirctGlobalTypes &globalTypes;
         mlir::Value value;
         mlir::Value loop_done;
         Scope<mlir::Value> symbol_table;
