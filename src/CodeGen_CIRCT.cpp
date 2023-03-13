@@ -114,15 +114,14 @@ void CodeGen_CIRCT::compile(const Module &input) {
 void CodeGen_CIRCT::create_circt_definitions(CirctGlobalTypes &globalTypes, mlir::ImplicitLocOpBuilder &builder) {
     // Create MemAccessFSM machine definition
     {
-        // Inputs: {enable, mem_access_started, mem_access_finished}
-        mlir::SmallVector<mlir::Type> inputs{builder.getI1Type(), builder.getI1Type(), builder.getI1Type()};
+        // Inputs: {enable, finished}
+        mlir::SmallVector<mlir::Type> inputs{builder.getI1Type(), builder.getI1Type()};
         // Outputs: {valid, done}
         mlir::SmallVector<mlir::Type> results{builder.getI1Type(), builder.getI1Type()};
         mlir::FunctionType function_type = builder.getFunctionType(inputs, results);
         globalTypes.memAccessFSM = builder.create<circt::fsm::MachineOp>("MemAccessFSM", "IDLE", function_type);
         mlir::ArrayAttr argNames = builder.getArrayAttr({builder.getStringAttr("enable"),
-                                                         builder.getStringAttr("mem_access_started"),
-                                                         builder.getStringAttr("mem_access_finished")});
+                                                         builder.getStringAttr("finished")});
         globalTypes.memAccessFSM.setArgNamesAttr(argNames);
         mlir::ArrayAttr resNames = builder.getArrayAttr({builder.getStringAttr("valid"),
                                                          builder.getStringAttr("done")});
@@ -140,28 +139,12 @@ void CodeGen_CIRCT::create_circt_definitions(CirctGlobalTypes &globalTypes, mlir
             mlir::Region &transitions = idleState.getTransitions();
             mlir::ImplicitLocOpBuilder transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
             {
-                circt::fsm::TransitionOp transition = transitionsBuilder.create<circt::fsm::TransitionOp>("READY");
+                circt::fsm::TransitionOp transition = transitionsBuilder.create<circt::fsm::TransitionOp>("BUSY");
                 transition.ensureGuard(transitionsBuilder);
                 circt::fsm::ReturnOp returnOp = transition.getGuardReturn();
                 returnOp.setOperand(globalTypes.memAccessFSM.getArgument(0));
             }
         }
-
-        {
-            circt::fsm::StateOp readyState = fsmBuilder.create<circt::fsm::StateOp>("READY");
-            {
-                readyState.getOutputOp()->setOperands(mlir::ValueRange{val1, val0});
-            }
-            mlir::Region &transitions = readyState.getTransitions();
-            mlir::ImplicitLocOpBuilder transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
-            {
-                circt::fsm::TransitionOp transition = transitionsBuilder.create<circt::fsm::TransitionOp>("BUSY");
-                transition.ensureGuard(transitionsBuilder);
-                circt::fsm::ReturnOp returnOp = transition.getGuardReturn();
-                returnOp.setOperand(globalTypes.memAccessFSM.getArgument(1));
-            }
-        }
-
         {
             circt::fsm::StateOp busyState = fsmBuilder.create<circt::fsm::StateOp>("BUSY");
             {
@@ -173,10 +156,9 @@ void CodeGen_CIRCT::create_circt_definitions(CirctGlobalTypes &globalTypes, mlir
                 circt::fsm::TransitionOp transition = transitionsBuilder.create<circt::fsm::TransitionOp>("DONE");
                 transition.ensureGuard(transitionsBuilder);
                 circt::fsm::ReturnOp returnOp = transition.getGuardReturn();
-                returnOp.setOperand(globalTypes.memAccessFSM.getArgument(2));
+                returnOp.setOperand(globalTypes.memAccessFSM.getArgument(1));
             }
         }
-
         {
             circt::fsm::StateOp doneState = fsmBuilder.create<circt::fsm::StateOp>("DONE");
             {
@@ -281,17 +263,6 @@ CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, CirctGlobal
         }
     }
 
-    class LoadStoreCounter : public IRVisitor {
-    public:
-        using IRVisitor::visit;
-        LoadStoreCounter(const std::string &name) : name(name) {}
-        void visit(const Load *op) override { if (op->name == name) loadCount++; }
-        void visit(const Store *op) override { if (op->name == name) storeCount++; }
-        uint64_t loadCount = 0, storeCount = 0;
-    private:
-        std::string name;
-    };
-
     // For each buffer argument, we use a different AXI4 master interface (up to 16), named [m00_axi, ..., m16_axi]
     for (size_t i = 0; i < buffer_arguments.size(); i++) {
         const std::vector<std::tuple<std::string, mlir::Type, circt::hw::PortDirection>> axi_signals = {
@@ -321,7 +292,22 @@ CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, CirctGlobal
                                                 std::to_string(i) + "_" + std::get<0>(signal)),
                                                 std::get<2>(signal), std::get<1>(signal)});
         }
+    }
 
+    class LoadStoreCounter : public IRVisitor {
+    public:
+        using IRVisitor::visit;
+        LoadStoreCounter(const std::string &name) : name(name) {}
+        void visit(const Load *op) override { if (op->name == name) loadCount++; }
+        void visit(const Store *op) override { if (op->name == name) storeCount++; }
+        uint64_t loadCount = 0, storeCount = 0;
+    private:
+        std::string name;
+    };
+
+    std::vector<LoadStoreCounter> loadStoreCounters;
+    std::map<int, circt::fsm::MachineOp> storeMemoryArbiterFSM;
+    for (size_t i = 0; i < buffer_arguments.size(); i++) {
         // Count number of loads and stores
         LoadStoreCounter loadStoreCounter(buffer_arguments[i].name);
         function.body.accept(&loadStoreCounter);
@@ -331,6 +317,8 @@ CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, CirctGlobal
 
         if (loadStoreCounter.storeCount > 0)
             storeMemoryArbiterFSM[i] = create_store_memory_arbiter_fsm(builder, loadStoreCounter.storeCount);
+
+        loadStoreCounters.push_back(loadStoreCounter);
     }
 
     // Create module top
@@ -396,6 +384,49 @@ CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, CirctGlobal
 
         axi_interface++;
     }
+
+    // For each buffer argument (AXI interface) instantiate a memory access arbiter
+    for (size_t i = 0; i < buffer_arguments.size(); i++) {
+        if (loadStoreCounters[i].storeCount > 0) {
+            // Create arbiter inputs
+            mlir::SmallVector<mlir::Value> arbiterInputs;
+            mlir::SmallVector<mlir::Value> validSignalsToArbiter;
+            for (uint64_t j = 0; j < loadStoreCounters[i].storeCount; j++) {
+                mlir::Value validSignal = builder.create<circt::sv::WireOp>(builder.getI1Type());
+                validSignalsToArbiter.push_back(validSignal);
+                arbiterInputs.push_back(builder.create<circt::sv::ReadInOutOp>(validSignal));
+            }
+            arbiterInputs.push_back(sym_get("m" + std::string(i < 10 ? "0" : "") + std::to_string(i) + "_bvalid"));
+
+            // Instantiate arbiter FSM
+            circt::fsm::HWInstanceOp storeMemoryArbiterInstance =
+                builder.create<circt::fsm::HWInstanceOp>(storeMemoryArbiterFSM[i].getFunctionType().getResults(),
+                                                         storeMemoryArbiterFSM[i].getName().str() + "_" + std::to_string(i),
+                                                         storeMemoryArbiterFSM[i].getSymName(), arbiterInputs,
+                                                         sym_get("clk"), sym_get("reset"));
+
+            mlir::SmallVector<mlir::Value> doneSignalsFromArbiter;
+            for (uint64_t j = 0; j < loadStoreCounters[i].storeCount; j++) {
+                doneSignalsFromArbiter.push_back(builder.create<circt::sv::WireOp>(builder.getI1Type()));
+                storeEnableSignals.push_back(builder.create<circt::sv::WireOp>(builder.getI1Type()));
+
+                // Create and connect the memory access FSM to the memory arbiter
+                mlir::Value doneSignalFromArbiter = storeMemoryArbiterInstance.getResult(j);
+                mlir::Value storeEnableSignalReadInOut = builder.create<circt::sv::ReadInOutOp>(storeEnableSignals[j]);
+
+                circt::fsm::HWInstanceOp storeFsmInstance;
+                storeFsmInstance = builder.create<circt::fsm::HWInstanceOp>(globalTypes.memAccessFSM.getFunctionType().getResults(),
+                                                                            globalTypes.memAccessFSM.getSymName().str() + "_" +
+                                                                            std::to_string(i) + "_" + std::to_string(j),
+                                                                            globalTypes.memAccessFSM.getSymName(),
+                                                                            mlir::ValueRange({storeEnableSignalReadInOut, doneSignalFromArbiter}),
+                                                                            sym_get("clk"), sym_get("reset"));
+
+                builder.create<circt::sv::AssignOp>(validSignalsToArbiter[j], storeFsmInstance.getResult(0));
+                storeDoneSignals.push_back(storeFsmInstance.getResult(1));
+            }
+        }
+    }
 }
 
 circt::fsm::MachineOp CodeGen_CIRCT::Visitor::create_store_memory_arbiter_fsm(mlir::ImplicitLocOpBuilder &builder, uint64_t storeCount)
@@ -418,8 +449,8 @@ circt::fsm::MachineOp CodeGen_CIRCT::Visitor::create_store_memory_arbiter_fsm(ml
 
     for (uint64_t i = 0; i < storeCount; i++) {
         const std::string storePrefix = "store_" + std::to_string(i);
-        argNames.push_back(builder.getStringAttr(storePrefix + "_valid"));
-        resNames.push_back(builder.getStringAttr(storePrefix + "_done"));
+        argNames.push_back(builder.getStringAttr("from_" + storePrefix + "_valid"));
+        resNames.push_back(builder.getStringAttr("to_" + storePrefix + "_done"));
 
         {
             circt::fsm::StateOp idleState = fsmBuilder.create<circt::fsm::StateOp>(storePrefix + "_idle");
@@ -436,7 +467,6 @@ circt::fsm::MachineOp CodeGen_CIRCT::Visitor::create_store_memory_arbiter_fsm(ml
                 returnOp.setOperand(machineOP.getArgument(i));
             }
         }
-
         {
             circt::fsm::StateOp busyState = fsmBuilder.create<circt::fsm::StateOp>(storePrefix + "_busy");
             {
@@ -452,7 +482,6 @@ circt::fsm::MachineOp CodeGen_CIRCT::Visitor::create_store_memory_arbiter_fsm(ml
                 returnOp.setOperand(machineOP.getArgument(storeCount)); // axi_bvalid
             }
         }
-
         {
             circt::fsm::StateOp doneState = fsmBuilder.create<circt::fsm::StateOp>(storePrefix + "_done");
             {
@@ -787,6 +816,8 @@ void CodeGen_CIRCT::Visitor::visit(const For *op) {
     // Inner loops will update this signal
     loop_done = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(true));
 
+    uint64_t prevStoreIdx = curStoreIdx;
+
     sym_push(op->name, loop_var_with_sign);
     codegen(op->body);
     sym_pop(op->name);
@@ -796,7 +827,9 @@ void CodeGen_CIRCT::Visitor::visit(const For *op) {
 
     // Update signal for outer loops to know this inner loop has finished
     loop_done = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq, loop_var, to_signless(max));
-    // TODO: loop_done = builder.create<circt::comb::AndOp>(loop_done, mem_accesses_finished);
+    if (prevStoreIdx != curStoreIdx) {
+        // TODO: loop_done = builder.create<circt::comb::AndOp>(loop_done, store[curStore].done);
+    }
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Store *op) {
@@ -817,14 +850,18 @@ void CodeGen_CIRCT::Visitor::visit(const Store *op) {
     mlir::Value offset = builder.create<circt::hwarith::MulOp>(mlir::ValueRange{index, element_size});
     mlir::Value addr = builder.create<circt::hwarith::AddOp>(mlir::ValueRange{buf, truncate_int(offset, 64)});
 
-    mlir::TypeRange outputs = globalTypes.memAccessFSM.getFunctionType().getResults();
-    mlir::Value foo = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(false));
-    circt::fsm::HWInstanceOp fsmInstance = builder.create<circt::fsm::HWInstanceOp>(outputs, op->name,
-                                                                                    globalTypes.memAccessFSM.getSymName(),
-                                                                                    mlir::ValueRange({foo, foo, foo}),
-                                                                                    sym_get("clk"), sym_get("reset"));
+    mlir::Value enableSignal;
+    if (curStoreIdx > 0) {
+        enableSignal = storeDoneSignals[curStoreIdx];
+    } else {
+        enableSignal = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(true));
+    }
+
+    builder.create<circt::sv::AssignOp>(storeEnableSignals[curStoreIdx], enableSignal);
 
     // if (predicate) buffer[op->name].store(index, value);
+
+    curStoreIdx++;
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Provide *op) {

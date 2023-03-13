@@ -9,6 +9,7 @@
 
 #include <circt/Dialect/FSM/FSMOps.h>
 #include <circt/Dialect/HW/HWOps.h>
+#include <circt/Dialect/SV/SVOps.h>
 
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/ImplicitLocOpBuilder.h>
@@ -109,7 +110,8 @@ protected:
         CirctGlobalTypes &globalTypes;
         mlir::Value value;
         mlir::Value loop_done;
-        std::map<int, circt::fsm::MachineOp> storeMemoryArbiterFSM; // One for each AXI interface
+        std::vector<circt::sv::WireOp> storeEnableSignals;
+        std::vector<mlir::Value> storeDoneSignals;
         uint64_t curStoreIdx = 0;
         Scope<mlir::Value> symbol_table;
     };
