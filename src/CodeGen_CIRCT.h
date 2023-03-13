@@ -109,7 +109,7 @@ protected:
         CirctGlobalTypes &globalTypes;
         mlir::Value value;
         mlir::Value loop_done;
-        std::vector<circt::fsm::MachineOp> storeMemoryArbiterFSM; // One for each AXI interface
+        std::map<int, circt::fsm::MachineOp> storeMemoryArbiterFSM; // One for each AXI interface
         uint64_t curStoreIdx = 0;
         Scope<mlir::Value> symbol_table;
     };
