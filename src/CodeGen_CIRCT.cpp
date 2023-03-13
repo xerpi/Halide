@@ -190,6 +190,7 @@ void CodeGen_CIRCT::create_circt_definitions(CirctGlobalTypes &globalTypes, mlir
 
 CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, CirctGlobalTypes &globalTypes, const Internal::LoweredFunc &function)
     : builder(builder), globalTypes(globalTypes) {
+
     // Generate module ports (inputs and outputs)
     mlir::SmallVector<circt::hw::PortInfo> ports;
 
@@ -277,6 +278,17 @@ CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, CirctGlobal
         }
     }
 
+    class LoadStoreCounter : public IRVisitor {
+    public:
+        using IRVisitor::visit;
+        LoadStoreCounter(const std::string &name) : name(name) {}
+        void visit(const Load *op) override { if (op->name == name) loadCount++; }
+        void visit(const Store *op) override { if (op->name == name) storeCount++; }
+        uint64_t loadCount = 0, storeCount = 0;
+    private:
+        std::string name;
+    };
+
     // For each buffer argument, we use a different AXI4 master interface (up to 16), named [m00_axi, ..., m16_axi]
     for (size_t i = 0; i < buffer_arguments.size(); i++) {
         const std::vector<std::tuple<std::string, mlir::Type, circt::hw::PortDirection>> axi_signals = {
@@ -306,6 +318,15 @@ CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, CirctGlobal
                                                 std::to_string(i) + "_" + std::get<0>(signal)),
                                                 std::get<2>(signal), std::get<1>(signal)});
         }
+
+        // Count number of loads and stores
+        LoadStoreCounter loadStoreCounter(buffer_arguments[i].name);
+        function.body.accept(&loadStoreCounter);
+
+        debug(1) << "Load count to buffer \"" << buffer_arguments[i].name << "\": " << loadStoreCounter.loadCount << "\n";
+        debug(1) << "Store count to buffer \"" << buffer_arguments[i].name << "\": " << loadStoreCounter.storeCount << "\n";
+
+        storeMemoryArbiterFSM.push_back(create_store_memory_arbiter_fsm(builder, loadStoreCounter.storeCount));
     }
 
     // Create module top
@@ -371,6 +392,16 @@ CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, CirctGlobal
 
         axi_interface++;
     }
+}
+
+circt::fsm::MachineOp CodeGen_CIRCT::Visitor::create_store_memory_arbiter_fsm(mlir::ImplicitLocOpBuilder &builder, uint64_t storeCount)
+{
+    // Inputs: {enable, mem_access_started, mem_access_finished}
+    mlir::SmallVector<mlir::Type> inputs{builder.getI1Type(), builder.getI1Type(), builder.getI1Type()};
+    // Outputs: {valid, done}
+    mlir::SmallVector<mlir::Type> results{builder.getI1Type(), builder.getI1Type()};
+    mlir::FunctionType function_type = builder.getFunctionType(inputs, results);
+    return builder.create<circt::fsm::MachineOp>("StoreMemoryArbiterFSM", "store_0", function_type);
 }
 
 mlir::Value CodeGen_CIRCT::Visitor::codegen(const Expr &e) {

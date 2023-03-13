@@ -103,15 +103,19 @@ protected:
         mlir::Value to_signless(const mlir::Value &value);
 
     private:
+        static circt::fsm::MachineOp create_store_memory_arbiter_fsm(mlir::ImplicitLocOpBuilder &builder, uint64_t storeCount);
+
         mlir::ImplicitLocOpBuilder &builder;
         CirctGlobalTypes &globalTypes;
         mlir::Value value;
         mlir::Value loop_done;
+        std::vector<circt::fsm::MachineOp> storeMemoryArbiterFSM; // One for each AXI interface
+        uint64_t curStoreIdx = 0;
         Scope<mlir::Value> symbol_table;
     };
 
 private:
-    void create_circt_definitions(CirctGlobalTypes &globalTypes, mlir::ImplicitLocOpBuilder &builder);
+    static void create_circt_definitions(CirctGlobalTypes &globalTypes, mlir::ImplicitLocOpBuilder &builder);
 
     mlir::MLIRContext mlir_context;
 };
