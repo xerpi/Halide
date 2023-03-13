@@ -54,198 +54,229 @@ void CodeGen_CIRCT::compile(const Module &input) {
     opts.maximumNumberOfTermsPerExpression = 1000;
     opts.emitBindComments = true;
 
+    mlir::LocationAttr loc = mlir::UnknownLoc::get(&mlir_context);
+    mlir::ModuleOp mlir_module = mlir::ModuleOp::create(loc, {});
+    opts.setAsAttribute(mlir_module);
+    mlir::ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
+    CirctGlobalTypes globalTypes;
+
+    // Create top level ("builtin.module") common definitions for all the HW modules to use
+    create_circt_definitions(globalTypes, builder);
+
     // Translate each function into a CIRCT HWModuleOp
-    for (const auto &f : input.functions()) {
+    for (const auto &function : input.functions()) {
+        std::cout << "Generating CIRCT MLIR IR for function " << function.name << std::endl;
+        CodeGen_CIRCT::Visitor visitor(builder, globalTypes, function);
+        function.body.accept(&visitor);
+    }
 
-        std::cout << "Generating CIRCT MLIR IR for function " << f.name << std::endl;
+    // Print MLIR before running passes
+    std::cout << "Original MLIR" << std::endl;
+    mlir_module.dump();
 
-        mlir::LocationAttr loc = mlir::UnknownLoc::get(&mlir_context);
-        mlir::ModuleOp mlir_module = mlir::ModuleOp::create(loc, {});
-        opts.setAsAttribute(mlir_module);
-        mlir::ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
+    // Verify module (before running passes)
+    auto moduleVerifyResult = mlir::verify(mlir_module);
+    std::cout << "Module verify (before passess) result: " << moduleVerifyResult.succeeded() << std::endl;
+    internal_assert(moduleVerifyResult.succeeded());
 
-        // Generate module ports (inputs and outputs)
-        mlir::SmallVector<circt::hw::PortInfo> ports;
+    // Create and run passes
+    std::cout << "Running passes." << std::endl;
+    mlir::PassManager pm(mlir_module.getContext());
+    pm.addPass(circt::createHWArithToHWPass());
+    pm.addPass(circt::createConvertFSMToSVPass());
+    pm.addPass(circt::seq::createSeqLowerToSVPass());
+    pm.nest<circt::hw::HWModuleOp>().addPass(circt::sv::createHWCleanupPass());
+    pm.nest<circt::hw::HWModuleOp>().addPass(circt::sv::createHWLegalizeModulesPass());
+    auto &modulePM = pm.nest<circt::hw::HWModuleOp>();
+    modulePM.addPass(circt::sv::createPrettifyVerilogPass());
 
-        // Clock and reset signals
-        ports.push_back(circt::hw::PortInfo{builder.getStringAttr("clk"), circt::hw::PortDirection::INPUT, builder.getI1Type(), 0});
-        ports.push_back(circt::hw::PortInfo{builder.getStringAttr("reset"), circt::hw::PortDirection::INPUT, builder.getI1Type(), 0});
+    auto pmRunResult = pm.run(mlir_module);
+    std::cout << "Run passes result: " << pmRunResult.succeeded() << std::endl;
+    //std::cout << "Module inputs: " << top.getNumInputs() << ", outputs: " << top.getNumOutputs() << std::endl;
 
-        // Convert function arguments to module ports
-        //std::vector<LoweredArgument> scalar_arguments;
-        std::vector<LoweredArgument> buffer_arguments;
-        debug(1) << "\tArg count: " << f.args.size() << "\n";
+    // Print MLIR after running passes
+    std::cout << "MLIR after running passes" << std::endl;
+    mlir_module.dump();
 
-        for (const auto &arg: f.args) {
-            static const char *const kind_names[] = {
-                "halide_argument_kind_input_scalar",
-                "halide_argument_kind_input_buffer",
-                "halide_argument_kind_output_buffer",
-            };
+    // Verify module (after running passes)
+    moduleVerifyResult = mlir::verify(mlir_module);
+    std::cout << "Module verify (after passes) result: " << moduleVerifyResult.succeeded() << std::endl;
+    internal_assert(moduleVerifyResult.succeeded());
 
-            static const char *const type_code_names[] = {
-                "halide_type_int",
-                "halide_type_uint",
-                "halide_type_float",
-                "halide_type_handle",
-                "halide_type_bfloat",
-            };
+    // Generate Verilog
+    std::cout << "Exporting Verilog." << std::endl;
+    auto exportVerilogResult = circt::exportSplitVerilog(mlir_module, "gen/");
+    std::cout << "Export Verilog result: " << exportVerilogResult.succeeded() << std::endl;
 
-            debug(1) << "\t\tArg: " << arg.name << "\n";
-            debug(1) << "\t\t\tKind: " << kind_names[arg.kind] << "\n";
-            debug(1) << "\t\t\tDimensions: " << int(arg.dimensions) << "\n";
-            debug(1) << "\t\t\tType: " << type_code_names[arg.type.code()] << "\n";
-            debug(1) << "\t\t\tType bits: " << arg.type.bits() << "\n";
-            debug(1) << "\t\t\tType lanes: " << arg.type.lanes() << "\n";
+    std::cout << "Done!" << std::endl;
+}
 
-            mlir::Type type;
+void CodeGen_CIRCT::create_circt_definitions(CirctGlobalTypes &globalTypes, mlir::ImplicitLocOpBuilder &builder) {
+    // Create MemAccessFSM machine definition
+    {
+        mlir::SmallVector<mlir::Type> inputs{builder.getI1Type()};
+        mlir::SmallVector<mlir::Type> results{builder.getI1Type()};
+        mlir::FunctionType function_type = builder.getFunctionType(inputs, results);
+        globalTypes.memAccessFSM = builder.create<circt::fsm::MachineOp>("MemAccessFSM", "WAIT", function_type);
+        mlir::Region &fsm_body = globalTypes.memAccessFSM.getBody();
+        mlir::ImplicitLocOpBuilder fsm_builder = mlir::ImplicitLocOpBuilder::atBlockEnd(fsm_body.getLoc(), &fsm_body.front());
 
-            switch (arg.kind) {
-            case Argument::Kind::InputScalar:
-                switch (arg.type.code()) {
-                case Type::Int:
-                case Type::UInt:
-                    type = builder.getIntegerType(arg.type.bits(), arg.type.is_int());
-                    ports.push_back(circt::hw::PortInfo{builder.getStringAttr(arg.name), circt::hw::PortDirection::INPUT, type, 0});
-                    break;
-                case Type::Float:
-                case Type::BFloat:
-                    assert(0 && "TODO");
-                    break;
-                case Type::Handle:
-                    // TODO: Ignore for now
-                    break;
-                }
-                //scalar_arguments.push_back(arg);
-                break;
-            case Argument::Kind::InputBuffer:
-            case Argument::Kind::OutputBuffer:
-                struct BufferDescriptorEntry {
-                    std::string suffix;
-                    mlir::Type type;
-                };
+        circt::fsm::StateOp wait_state = fsm_builder.create<circt::fsm::StateOp>("WAIT");
+        {
+            mlir::Region &output = wait_state.getOutput();
+            mlir::ImplicitLocOpBuilder output_builder = mlir::ImplicitLocOpBuilder::atBlockBegin(output.getLoc(), &output.front());
+            {
+                mlir::Value b = output_builder.create<circt::hw::ConstantOp>(output_builder.getBoolAttr(true));
+                wait_state.getOutputOp()->setOperands(mlir::ValueRange{b});
+            }
+            mlir::Region &transitions = wait_state.getTransitions();
+            mlir::ImplicitLocOpBuilder transitions_builder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
+            {
 
-                std::vector<BufferDescriptorEntry> entries;
-                mlir::Type si32 = builder.getIntegerType(32, true);
-                mlir::Type ui64 = builder.getIntegerType(64, true);
-
-                // A pointer to the start of the data in main memory (offset of the buffer into the AXI4 master interface)
-                entries.push_back({"host", ui64});
-                // The dimensionality of the buffer
-                entries.push_back({"dimensions", si32});
-
-                // Buffer dimensions
-                for (int i = 0; i < arg.dimensions; i++) {
-                    entries.push_back({"dim_" + std::to_string(i) + "_min", si32});
-                    entries.push_back({"dim_" + std::to_string(i) + "_extent", si32});
-                    entries.push_back({"dim_" + std::to_string(i) + "_stride", si32});
-                }
-
-                for (const auto &entry: entries) {
-                    ports.push_back(circt::hw::PortInfo{builder.getStringAttr(arg.name + "_" + entry.suffix),
-                                    circt::hw::PortDirection::INPUT, entry.type, 0});
-                }
-
-                buffer_arguments.push_back(arg);
-                break;
             }
         }
+        circt::fsm::StateOp ready_state = fsm_builder.create<circt::fsm::StateOp>("READY");
+        {
+            mlir::Region &output = ready_state.getOutput();
+            mlir::ImplicitLocOpBuilder output_builder = mlir::ImplicitLocOpBuilder::atBlockBegin(output.getLoc(), &output.front());
+            {
+                mlir::Value b = output_builder.create<circt::hw::ConstantOp>(output_builder.getBoolAttr(true));
+                ready_state.getOutputOp()->setOperands(mlir::ValueRange{b});
+            }
+            mlir::Region &transitions = ready_state.getTransitions();
+            mlir::ImplicitLocOpBuilder transitions_builder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
+            {
 
-        // For each buffer argument, we use a different AXI4 master interface (up to 16), named [m00_axi, ..., m16_axi]
-        for (size_t i = 0; i < buffer_arguments.size(); i++) {
-            const std::vector<std::tuple<std::string, mlir::Type, circt::hw::PortDirection>> axi_signals = {
-                {"awvalid", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
-                {"awready", builder.getI1Type(), circt::hw::PortDirection::INPUT},
-                {"awaddr",  builder.getI64Type(), circt::hw::PortDirection::OUTPUT},
-                {"awlen",   builder.getI8Type(), circt::hw::PortDirection::OUTPUT},
-                {"wvalid",  builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
-                {"wready",  builder.getI1Type(), circt::hw::PortDirection::INPUT},
-                {"wdata",   builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
-                {"wstrb",   builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
-                {"wlast",   builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
-                {"bvalid",  builder.getI1Type(), circt::hw::PortDirection::INPUT},
-                {"bready",  builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
-                {"arvalid", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
-                {"arready", builder.getI1Type(), circt::hw::PortDirection::INPUT},
-                {"araddr",  builder.getI64Type(), circt::hw::PortDirection::OUTPUT},
-                {"arlen",   builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
-                {"rvalid",  builder.getI1Type(), circt::hw::PortDirection::INPUT},
-                {"rready",  builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
-                {"rdata",   builder.getI1Type(), circt::hw::PortDirection::INPUT},
-                {"rlast",   builder.getI1Type(), circt::hw::PortDirection::INPUT},
-            };
-
-            for (const auto &signal: axi_signals) {
-                ports.push_back(circt::hw::PortInfo{builder.getStringAttr("m" + std::string(i < 10 ? "0" : "") +
-                                                    std::to_string(i) + "_" + std::get<0>(signal)),
-                                                    std::get<2>(signal), std::get<1>(signal)});
             }
         }
-
-        // Create module top
-        circt::hw::HWModuleOp top = builder.create<circt::hw::HWModuleOp>(builder.getStringAttr(f.name), ports);
-        builder.setInsertionPointToStart(top.getBodyBlock());
-
-        // Generate CIRCT MLIR IR
-        CodeGen_CIRCT::Visitor visitor(builder, top, buffer_arguments);
-        f.body.accept(&visitor);
-
-        // Print MLIR before running passes
-        std::cout << "Original MLIR" << std::endl;
-        mlir_module.dump();
-
-        debug(1) << "fsms: " << "\n";
-        for (auto machine: top.getOps<circt::fsm::MachineOp>()) {
-            debug(1) << "Got FSM!\n";
-        }
-
-        // Verify module (before running passes)
-        auto moduleVerifyResult = mlir::verify(mlir_module);
-        std::cout << "Module verify (before passess) result: " << moduleVerifyResult.succeeded() << std::endl;
-        internal_assert(moduleVerifyResult.succeeded());
-
-        // Create and run passes
-        std::cout << "Running passes." << std::endl;
-        mlir::PassManager pm(mlir_module.getContext());
-        pm.addPass(circt::createHWArithToHWPass());
-        pm.addPass(circt::createConvertFSMToSVPass());
-        pm.addPass(circt::seq::createSeqLowerToSVPass());
-        pm.nest<circt::hw::HWModuleOp>().addPass(circt::sv::createHWCleanupPass());
-        pm.nest<circt::hw::HWModuleOp>().addPass(circt::sv::createHWLegalizeModulesPass());
-        auto &modulePM = pm.nest<circt::hw::HWModuleOp>();
-        modulePM.addPass(circt::sv::createPrettifyVerilogPass());
-
-        auto pmRunResult = pm.run(mlir_module);
-        std::cout << "Run passes result: " << pmRunResult.succeeded() << std::endl;
-        std::cout << "Module inputs: " << top.getNumInputs() << ", outputs: " << top.getNumOutputs() << std::endl;
-
-        // Print MLIR after running passes
-        std::cout << "MLIR after running passes" << std::endl;
-        mlir_module.dump();
-
-        // Verify module (after running passes)
-        moduleVerifyResult = mlir::verify(mlir_module);
-        std::cout << "Module verify (after passes) result: " << moduleVerifyResult.succeeded() << std::endl;
-        internal_assert(moduleVerifyResult.succeeded());
-
-        // Exmit Verilog
-        std::string str;
-        llvm::raw_string_ostream os(str);
-        std::cout << "Exporting Verilog." << std::endl;
-        auto exportVerilogResult = circt::exportVerilog(mlir_module, os);
-        std::cout << "Export Verilog result: " << exportVerilogResult.succeeded() << std::endl;
-        std::cout << str << std::endl;
-
-        std::cout << "Done!" << std::endl;
-
-        std::ofstream file(f.name + ".sv");
-        file << str;
-        file.close();
+        //fsm_builder.create<circt::fsm::StateOp>("BUSY");
+        //fsm_builder.create<circt::fsm::StateOp>("DONE");
     }
 }
 
-CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, circt::hw::HWModuleOp &top, const std::vector<LoweredArgument> &buffer_arguments)
-    : builder(builder) {
+CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, const CirctGlobalTypes &globalTypes, const Internal::LoweredFunc &function)
+    : builder(builder), globalTypes(globalTypes) {
+    // Generate module ports (inputs and outputs)
+    mlir::SmallVector<circt::hw::PortInfo> ports;
+
+    // Clock and reset signals
+    ports.push_back(circt::hw::PortInfo{builder.getStringAttr("clk"), circt::hw::PortDirection::INPUT, builder.getI1Type(), 0});
+    ports.push_back(circt::hw::PortInfo{builder.getStringAttr("reset"), circt::hw::PortDirection::INPUT, builder.getI1Type(), 0});
+
+    // Convert function arguments to module ports
+    //std::vector<LoweredArgument> scalar_arguments;
+    std::vector<LoweredArgument> buffer_arguments;
+    debug(1) << "\tArg count: " << function.args.size() << "\n";
+
+    for (const auto &arg: function.args) {
+        static const char *const kind_names[] = {
+            "halide_argument_kind_input_scalar",
+            "halide_argument_kind_input_buffer",
+            "halide_argument_kind_output_buffer",
+        };
+
+        static const char *const type_code_names[] = {
+            "halide_type_int",
+            "halide_type_uint",
+            "halide_type_float",
+            "halide_type_handle",
+            "halide_type_bfloat",
+        };
+
+        debug(1) << "\t\tArg: " << arg.name << "\n";
+        debug(1) << "\t\t\tKind: " << kind_names[arg.kind] << "\n";
+        debug(1) << "\t\t\tDimensions: " << int(arg.dimensions) << "\n";
+        debug(1) << "\t\t\tType: " << type_code_names[arg.type.code()] << "\n";
+        debug(1) << "\t\t\tType bits: " << arg.type.bits() << "\n";
+        debug(1) << "\t\t\tType lanes: " << arg.type.lanes() << "\n";
+
+        mlir::Type type;
+
+        switch (arg.kind) {
+        case Argument::Kind::InputScalar:
+            switch (arg.type.code()) {
+            case Type::Int:
+            case Type::UInt:
+                type = builder.getIntegerType(arg.type.bits(), arg.type.is_int());
+                ports.push_back(circt::hw::PortInfo{builder.getStringAttr(arg.name), circt::hw::PortDirection::INPUT, type, 0});
+                break;
+            case Type::Float:
+            case Type::BFloat:
+                assert(0 && "TODO");
+                break;
+            case Type::Handle:
+                // TODO: Ignore for now
+                break;
+            }
+            //scalar_arguments.push_back(arg);
+            break;
+        case Argument::Kind::InputBuffer:
+        case Argument::Kind::OutputBuffer:
+            struct BufferDescriptorEntry {
+                std::string suffix;
+                mlir::Type type;
+            };
+
+            std::vector<BufferDescriptorEntry> entries;
+            mlir::Type si32 = builder.getIntegerType(32, true);
+            mlir::Type ui64 = builder.getIntegerType(64, true);
+
+            // A pointer to the start of the data in main memory (offset of the buffer into the AXI4 master interface)
+            entries.push_back({"host", ui64});
+            // The dimensionality of the buffer
+            entries.push_back({"dimensions", si32});
+
+            // Buffer dimensions
+            for (int i = 0; i < arg.dimensions; i++) {
+                entries.push_back({"dim_" + std::to_string(i) + "_min", si32});
+                entries.push_back({"dim_" + std::to_string(i) + "_extent", si32});
+                entries.push_back({"dim_" + std::to_string(i) + "_stride", si32});
+            }
+
+            for (const auto &entry: entries) {
+                ports.push_back(circt::hw::PortInfo{builder.getStringAttr(arg.name + "_" + entry.suffix),
+                                circt::hw::PortDirection::INPUT, entry.type, 0});
+            }
+
+            buffer_arguments.push_back(arg);
+            break;
+        }
+    }
+
+    // For each buffer argument, we use a different AXI4 master interface (up to 16), named [m00_axi, ..., m16_axi]
+    for (size_t i = 0; i < buffer_arguments.size(); i++) {
+        const std::vector<std::tuple<std::string, mlir::Type, circt::hw::PortDirection>> axi_signals = {
+            {"awvalid", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+            {"awready", builder.getI1Type(), circt::hw::PortDirection::INPUT},
+            {"awaddr",  builder.getI64Type(), circt::hw::PortDirection::OUTPUT},
+            {"awlen",   builder.getI8Type(), circt::hw::PortDirection::OUTPUT},
+            {"wvalid",  builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+            {"wready",  builder.getI1Type(), circt::hw::PortDirection::INPUT},
+            {"wdata",   builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+            {"wstrb",   builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+            {"wlast",   builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+            {"bvalid",  builder.getI1Type(), circt::hw::PortDirection::INPUT},
+            {"bready",  builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+            {"arvalid", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+            {"arready", builder.getI1Type(), circt::hw::PortDirection::INPUT},
+            {"araddr",  builder.getI64Type(), circt::hw::PortDirection::OUTPUT},
+            {"arlen",   builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+            {"rvalid",  builder.getI1Type(), circt::hw::PortDirection::INPUT},
+            {"rready",  builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+            {"rdata",   builder.getI1Type(), circt::hw::PortDirection::INPUT},
+            {"rlast",   builder.getI1Type(), circt::hw::PortDirection::INPUT},
+        };
+
+        for (const auto &signal: axi_signals) {
+            ports.push_back(circt::hw::PortInfo{builder.getStringAttr("m" + std::string(i < 10 ? "0" : "") +
+                                                std::to_string(i) + "_" + std::get<0>(signal)),
+                                                std::get<2>(signal), std::get<1>(signal)});
+        }
+    }
+
+    // Create module top
+    circt::hw::HWModuleOp top = builder.create<circt::hw::HWModuleOp>(builder.getStringAttr(function.name), ports);
+    builder.setInsertionPointToStart(top.getBodyBlock());
 
     // Add function arguments to the symbol table
     for (unsigned i = 0; i < top.getNumArguments(); i++) {
@@ -258,7 +289,6 @@ CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, circt::hw::
     for (unsigned i = 0; i < top.getNumResults(); i++) {
         std::string name = top.getResultNames()[i].cast<mlir::StringAttr>().str();
         mlir::Type type = top.getResultTypes()[i];
-        debug(1) << "RESULT: " << name << "\n";
         mlir::Value wire = builder.create<circt::sv::WireOp>(type);
         mlir::Value rdata = builder.create<circt::sv::ReadInOutOp>(wire);
         sym_push(name, rdata);
@@ -306,34 +336,6 @@ CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, circt::hw::
         sym_push(buf.name + ".buffer", buffer);
 
         axi_interface++;
-    }
-
-    // Create MemAccessFSM machine definition
-    {
-        mlir::SmallVector<mlir::Type> inputs{builder.getI1Type()};
-        mlir::SmallVector<mlir::Type> results{builder.getI1Type()};
-        mlir::FunctionType function_type = builder.getFunctionType(inputs, results);
-        MemAccessFSM = builder.create<circt::fsm::MachineOp>("MemAccessFSM", "WAIT", function_type);
-        mlir::Region &fsm_body = MemAccessFSM.getBody();
-        mlir::ImplicitLocOpBuilder fsm_builder = mlir::ImplicitLocOpBuilder::atBlockEnd(fsm_body.getLoc(), &fsm_body.front());
-
-        circt::fsm::StateOp wait_state = fsm_builder.create<circt::fsm::StateOp>("WAIT");
-        {
-            mlir::Region &output = wait_state.getOutput();
-            mlir::ImplicitLocOpBuilder output_builder = mlir::ImplicitLocOpBuilder::atBlockBegin(output.getLoc(), &output.front());
-            {
-                mlir::Value b = output_builder.create<circt::hw::ConstantOp>(output_builder.getBoolAttr(true));
-                wait_state.getOutputOp()->setOperands(mlir::ValueRange{b});
-            }
-            mlir::Region &transitions = wait_state.getTransitions();
-            mlir::ImplicitLocOpBuilder transitions_builder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
-            {
-
-            }
-        }
-        /*fsm_builder.create<circt::fsm::StateOp>("READY");
-        fsm_builder.create<circt::fsm::StateOp>("BUSY");
-        fsm_builder.create<circt::fsm::StateOp>("DONE");*/
     }
 }
 
@@ -538,8 +540,8 @@ void CodeGen_CIRCT::Visitor::visit(const Load *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
     debug(1) << "\tname: " << op->name << "\n";
 
-    mlir::Value predicate = codegen(op->predicate);
-    mlir::Value index = codegen(op->index);
+    //mlir::Value predicate = codegen(op->predicate);
+    //mlir::Value index = codegen(op->index);
 
     mlir::Type type = builder.getIntegerType(op->type.bits(), op->type.is_int());
     value = builder.create<circt::hwarith::ConstantOp>(type, builder.getIntegerAttr(type, 0x1234));

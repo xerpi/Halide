@@ -29,9 +29,13 @@ public:
     void compile(const Module &input);
 
 protected:
+    struct CirctGlobalTypes {
+        circt::fsm::MachineOp memAccessFSM;
+    };
+
     class Visitor : public IRVisitor {
     public:
-        Visitor(mlir::ImplicitLocOpBuilder &builder, circt::hw::HWModuleOp &top, const std::vector<LoweredArgument> &buffer_arguments);
+        Visitor(mlir::ImplicitLocOpBuilder &builder, const CirctGlobalTypes &globalTypes, const Internal::LoweredFunc &function);
 
     protected:
         mlir::Value codegen(const Expr &);
@@ -100,13 +104,15 @@ protected:
 
     private:
         mlir::ImplicitLocOpBuilder &builder;
+        const CirctGlobalTypes &globalTypes;
         mlir::Value value;
         mlir::Value loop_done;
-        circt::fsm::MachineOp MemAccessFSM;
         Scope<mlir::Value> symbol_table;
     };
 
 private:
+    void create_circt_definitions(CirctGlobalTypes &globalTypes, mlir::ImplicitLocOpBuilder &builder);
+
     mlir::MLIRContext mlir_context;
 };
 
