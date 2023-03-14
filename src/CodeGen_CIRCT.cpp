@@ -3,11 +3,14 @@
 
 #include <circt/Conversion/SCFToCalyx.h>
 #include <circt/Dialect/Calyx/CalyxDialect.h>
+#include <circt/Dialect/Calyx/CalyxEmitter.h>
 #include <circt/Dialect/Calyx/CalyxOps.h>
 
 #include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/MemRef/IR/MemRef.h>
+#include <mlir/Dialect/SCF/IR/SCF.h>
+#include <mlir/Dialect/SCF/Transforms/Passes.h>
 #include <mlir/IR/Verifier.h>
 #include <mlir/Pass/Pass.h>
 #include <mlir/Pass/PassManager.h>
@@ -27,6 +30,8 @@ CodeGen_CIRCT::CodeGen_CIRCT() {
     mlir_context.loadDialect<circt::calyx::CalyxDialect>();
     mlir_context.loadDialect<mlir::arith::ArithDialect>();
     mlir_context.loadDialect<mlir::func::FuncDialect>();
+    mlir_context.loadDialect<mlir::memref::MemRefDialect>();
+    mlir_context.loadDialect<mlir::scf::SCFDialect>();
 }
 
 void CodeGen_CIRCT::compile(const Module &input) {
@@ -37,19 +42,98 @@ void CodeGen_CIRCT::compile(const Module &input) {
     mlir::ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
 
     // Translate each function into a Calyx component
+    std::vector<std::string> inputNames;
+    mlir::SmallVector<Internal::LoweredFunc> bufferArguments;
     for (const auto &function : input.functions()) {
         std::cout << "Generating CIRCT MLIR IR for function " << function.name << std::endl;
 
-        // Inputs: {enable, finished}
-        mlir::SmallVector<mlir::Type> inputs{builder.getI1Type(), builder.getI1Type()};
-        // Outputs: {valid, done}
-        mlir::SmallVector<mlir::Type> results{};
-        mlir::FunctionType functionType = builder.getFunctionType(inputs, results);
+        mlir::SmallVector<mlir::Type> inputs;
+        mlir::SmallVector<mlir::Type> results;
 
+        for (const auto &arg: function.args) {
+            static const char *const kind_names[] = {
+                "halide_argument_kind_input_scalar",
+                "halide_argument_kind_input_buffer",
+                "halide_argument_kind_output_buffer",
+            };
+
+            static const char *const type_code_names[] = {
+                "halide_type_int",
+                "halide_type_uint",
+                "halide_type_float",
+                "halide_type_handle",
+                "halide_type_bfloat",
+            };
+
+            debug(1) << "\t\tArg: " << arg.name << "\n";
+            debug(1) << "\t\t\tKind: " << kind_names[arg.kind] << "\n";
+            debug(1) << "\t\t\tDimensions: " << int(arg.dimensions) << "\n";
+            debug(1) << "\t\t\tType: " << type_code_names[arg.type.code()] << "\n";
+            debug(1) << "\t\t\tType bits: " << arg.type.bits() << "\n";
+            debug(1) << "\t\t\tType lanes: " << arg.type.lanes() << "\n";
+
+            switch (arg.kind) {
+            case Argument::Kind::InputScalar:
+                switch (arg.type.code()) {
+                case Type::Int:
+                case Type::UInt:
+                    inputs.push_back(builder.getIntegerType(arg.type.bits(), arg.type.is_int()));
+                    inputNames.push_back(arg.name);
+                    break;
+                case Type::Float:
+                case Type::BFloat:
+                    assert(0 && "TODO");
+                    break;
+                case Type::Handle:
+                    // TODO: Ignore for now
+                    break;
+                }
+                break;
+            case Argument::Kind::InputBuffer:
+            case Argument::Kind::OutputBuffer:
+                struct BufferDescriptorEntry {
+                    std::string suffix;
+                    mlir::Type type;
+                };
+
+                std::vector<BufferDescriptorEntry> entries;
+                mlir::Type i32 = builder.getI32Type();
+                mlir::Type i64 = builder.getI64Type();
+
+                // A pointer to the start of the data in main memory (offset of the buffer into the AXI4 master interface)
+                entries.push_back({"host", i64});
+                // The dimensionality of the buffer
+                entries.push_back({"dimensions", i32});
+
+                // Buffer dimensions
+                for (int i = 0; i < arg.dimensions; i++) {
+                    entries.push_back({"dim_" + std::to_string(i) + "_min", i32});
+                    entries.push_back({"dim_" + std::to_string(i) + "_extent", i32});
+                    entries.push_back({"dim_" + std::to_string(i) + "_stride", i32});
+                }
+
+                for (const auto &entry: entries) {
+                    inputs.push_back(entry.type);
+                    inputNames.push_back(arg.name + "_" + entry.suffix);
+                }
+
+                break;
+                // Treat buffers as 1D
+                //mlir::SmallVector<int64_t> shape(arg.dimensions, mlir::ShapedType::kDynamic);
+                /*mlir::SmallVector<int64_t> shape{mlir::ShapedType::kDynamic};
+                mlir::Type elementType = builder.getIntegerType(arg.type.bits());
+                inputs.push_back(mlir::MemRefType::get(shape, elementType));
+                inputNames.push_back(arg.name + ".buffer");*/
+                //bufferArguments.push_back(arg);
+                //break;
+            }
+        }
+
+        mlir::FunctionType functionType = builder.getFunctionType(inputs, results);
         mlir::func::FuncOp functionOp = builder.create<mlir::func::FuncOp>(builder.getStringAttr(function.name), functionType);
         builder.setInsertionPointToStart(functionOp.addEntryBlock());
 
-        CodeGen_CIRCT::Visitor visitor(builder, function);
+        CodeGen_CIRCT::Visitor visitor(builder, function, inputNames);
         function.body.accept(&visitor);
 
         builder.create<mlir::func::ReturnOp>();
@@ -67,7 +151,9 @@ void CodeGen_CIRCT::compile(const Module &input) {
     // Create and run passes
     std::cout << "Running passes." << std::endl;
     mlir::PassManager pm(mlir_module.getContext());
+    pm.addPass(mlir::createForToWhileLoopPass());
     pm.addPass(circt::createSCFToCalyxPass());
+    //pm.addPass(circt::createCalyxToHWPass());
 
     auto pmRunResult = pm.run(mlir_module);
     std::cout << "Run passes result: " << pmRunResult.succeeded() << std::endl;
@@ -81,119 +167,44 @@ void CodeGen_CIRCT::compile(const Module &input) {
     std::cout << "Module verify (after passes) result: " << moduleVerifyResult.succeeded() << std::endl;
     internal_assert(moduleVerifyResult.succeeded());
 
+    // Emit Calyx
+    std::string str;
+    llvm::raw_string_ostream os(str);
+    std::cout << "Exporting Calyx." << std::endl;
+    auto exportVerilogResult = circt::calyx::exportCalyx(mlir_module, os);
+    std::cout << "Export Calyx result: " << exportVerilogResult.succeeded() << std::endl;
+    std::cout << str << std::endl;
+
     std::cout << "Done!" << std::endl;
 }
 
-CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, const Internal::LoweredFunc &function) : builder(builder) {
+CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, const Internal::LoweredFunc &function, const std::vector<std::string> &inputNames)
+    : builder(builder) {
 
-    // Generate module ports (inputs and outputs)
-    mlir::SmallVector<circt::calyx::PortInfo> ports;
+    mlir::func::FuncOp funcOp = cast<mlir::func::FuncOp>(builder.getBlock()->getParentOp());
 
-    // Clock and reset signals
-    ports.push_back({
-        builder.getStringAttr("clk"),
-        builder.getI1Type(),
-        circt::calyx::Direction::Input,
-        builder.getDictionaryAttr({builder.getNamedAttr(builder.getStringAttr("clk"),
-                                                        builder.getUnitAttr())})
-    });
-    ports.push_back({
-        builder.getStringAttr("done"),
-        builder.getI1Type(),
-        circt::calyx::Direction::Output,
-        builder.getDictionaryAttr({builder.getNamedAttr(builder.getStringAttr("done"),
-                                                        builder.getUnitAttr())})
-    });
-    ports.push_back({
-        builder.getStringAttr("go"),
-        builder.getI1Type(),
-        circt::calyx::Direction::Input,
-        builder.getDictionaryAttr({builder.getNamedAttr(builder.getStringAttr("go"),
-                                                        builder.getUnitAttr())})
-    });
-    ports.push_back({
-        builder.getStringAttr("reset"),
-        builder.getI1Type(),
-        circt::calyx::Direction::Input,
-        builder.getDictionaryAttr({builder.getNamedAttr(builder.getStringAttr("reset"),
-                                                        builder.getUnitAttr())})
-    });
+    // Add function arguments to the symbol table
+    for (unsigned int i = 0; i < funcOp.getFunctionType().getNumInputs(); i++) {
+        std::string name = inputNames[i];
+        sym_push(name, funcOp.getArgument(i));
+    }
 
-    // Convert function arguments to module ports
-    std::vector<LoweredArgument> bufferArgs;
-    debug(1) << "\tArg count: " << function.args.size() << "\n";
-
+    // Instantiate buffers (external memories by default) and add them to the symbol table
     for (const auto &arg: function.args) {
-        static const char *const kind_names[] = {
-            "halide_argument_kind_input_scalar",
-            "halide_argument_kind_input_buffer",
-            "halide_argument_kind_output_buffer",
-        };
-
-        static const char *const type_code_names[] = {
-            "halide_type_int",
-            "halide_type_uint",
-            "halide_type_float",
-            "halide_type_handle",
-            "halide_type_bfloat",
-        };
-
-        debug(1) << "\t\tArg: " << arg.name << "\n";
-        debug(1) << "\t\t\tKind: " << kind_names[arg.kind] << "\n";
-        debug(1) << "\t\t\tDimensions: " << int(arg.dimensions) << "\n";
-        debug(1) << "\t\t\tType: " << type_code_names[arg.type.code()] << "\n";
-        debug(1) << "\t\t\tType bits: " << arg.type.bits() << "\n";
-        debug(1) << "\t\t\tType lanes: " << arg.type.lanes() << "\n";
-
-        switch (arg.kind) {
-        case Argument::Kind::InputScalar:
-            switch (arg.type.code()) {
-            case Type::Int:
-            case Type::UInt:
-                ports.push_back({
-                    builder.getStringAttr(arg.name),
-                    builder.getIntegerType(arg.type.bits(), arg.type.is_int()),
-                    circt::calyx::Direction::Input,
-                    builder.getDictionaryAttr({builder.getNamedAttr(builder.getStringAttr(arg.name),
-                                                                    builder.getUnitAttr())})
-                });
-                break;
-            case Type::Float:
-            case Type::BFloat:
-                assert(0 && "TODO");
-                break;
-            case Type::Handle:
-                // TODO: Ignore for now
-                break;
+        if (arg.is_buffer()) {
+            mlir::SmallVector<int64_t> shape{mlir::ShapedType::kDynamic};
+            mlir::Type elementType = builder.getIntegerType(arg.type.bits());
+            mlir::MemRefType memRefType = mlir::MemRefType::get(shape, elementType);
+            mlir::Value dynamicSize = builder.create<mlir::arith::ConstantOp>(builder.getI64IntegerAttr(1));
+            for (int i = 0; i < arg.dimensions; i++) {
+                mlir::Value stride = sym_get(arg.name + "_dim_" + std::to_string(i) + "_stride");
+                mlir::Value stride64 = builder.create<mlir::arith::ExtUIOp>(builder.getI64Type(), stride);
+                dynamicSize = builder.create<mlir::arith::MulIOp>(dynamicSize, stride64);
             }
-            break;
-        case Argument::Kind::InputBuffer:
-        case Argument::Kind::OutputBuffer:
-            bufferArgs.push_back(arg);
-            break;
+            dynamicSize = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), dynamicSize);
+            sym_push(arg.name + ".buffer", builder.create<mlir::memref::AllocOp>(memRefType, mlir::ValueRange{dynamicSize}));
         }
     }
-
-#if 0
-    auto component = builder.create<circt::calyx::ComponentOp>(builder.getStringAttr(function.name), ports);
-    builder.setInsertionPointToStart(component.getBodyBlock());
-
-    // Instantiate external memories (buffer arguments). Consider all buffers as flat ([x + y * stride])
-    for (const auto &buf: bufferArgs) {
-        mlir::SmallVector<int64_t> addrSizes{64};
-        mlir::SmallVector<int64_t> sizes{32};
-        auto memoryOp = builder.create<circt::calyx::MemoryOp>(buf.name, buf.type.bits(), addrSizes, sizes);
-        memoryOp->setAttr("external", builder.getBoolAttr(true));
-    }
-
-    auto wires = component.getWiresOp();
-    mlir::Block *wiresBody = wires.getBodyBlock();
-
-    auto wiresBuilder = mlir::ImplicitLocOpBuilder::atBlockEnd(wires.getLoc(), wiresBody);
-
-    wiresBuilder.create<circt::calyx::AssignOp>(component.getDonePort(),
-                                                wiresBuilder.create<mlir::arith::ConstantOp>(wiresBuilder.getBoolAttr(true)));
-#endif
 }
 
 mlir::Value CodeGen_CIRCT::Visitor::codegen(const Expr &e) {
@@ -443,11 +454,36 @@ void CodeGen_CIRCT::Visitor::visit(const For *op) {
         "Extern", "GPUBlock", "GPUThread", "GPULane",
     };
     debug(1) << "\tForType: " << for_types[unsigned(op->for_type)] << "\n";
+
+    mlir::Value min = codegen(op->min);
+    mlir::Value extent = codegen(op->extent);
+    mlir::Value max = builder.create<mlir::arith::AddIOp>(min, extent);
+    mlir::Value lb = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), min);
+    mlir::Value ub = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), max);
+    mlir::Value step = builder.create<mlir::arith::ConstantIndexOp>(1);
+
+    mlir::scf::ForOp forOp = builder.create<mlir::scf::ForOp>(lb, ub, step);
+    mlir::Region &forBody = forOp.getLoopBody();
+
+    mlir::ImplicitLocOpBuilder prevBuilder = builder;
+    builder = mlir::ImplicitLocOpBuilder::atBlockBegin(forBody.getLoc(), &forBody.front());
+
+    sym_push(op->name, builder.create<mlir::arith::IndexCastOp>(max.getType(), forOp.getInductionVar()));
+    codegen(op->body);
+    sym_pop(op->name);
+
+    builder = prevBuilder;
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Store *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
     debug(1) << "\tName: " << op->name << "\n";
+
+    mlir::Value value = codegen(op->value);
+    mlir::Value index = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), codegen(op->index));
+    mlir::Value buf = sym_get(op->name + ".buffer");
+
+    builder.create<mlir::memref::StoreOp>(value, buf, mlir::ValueRange{index});
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Provide *op) {
