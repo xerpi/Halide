@@ -436,7 +436,7 @@ circt::fsm::MachineOp CodeGen_CIRCT::Visitor::create_store_memory_arbiter_fsm(ml
     // Outputs: storeCount * {done}
     mlir::SmallVector<mlir::Type> outputs(storeCount, builder.getI1Type());
     mlir::FunctionType function_type = builder.getFunctionType(inputs, outputs);
-    circt::fsm::MachineOp machineOP = builder.create<circt::fsm::MachineOp>("StoreMemoryArbiterFSM", "store_0_idle", function_type);
+    circt::fsm::MachineOp machineOP = builder.create<circt::fsm::MachineOp>("StoreMemoryArbiterFSM", "store_0_IDLE", function_type);
 
     mlir::Region &fsmBody = machineOP.getBody();
     mlir::ImplicitLocOpBuilder fsmBuilder = mlir::ImplicitLocOpBuilder::atBlockEnd(fsmBody.getLoc(), &fsmBody.front());
@@ -453,7 +453,7 @@ circt::fsm::MachineOp CodeGen_CIRCT::Visitor::create_store_memory_arbiter_fsm(ml
         resNames.push_back(builder.getStringAttr("to_" + storePrefix + "_done"));
 
         {
-            circt::fsm::StateOp idleState = fsmBuilder.create<circt::fsm::StateOp>(storePrefix + "_idle");
+            circt::fsm::StateOp idleState = fsmBuilder.create<circt::fsm::StateOp>(storePrefix + "_IDLE");
             {
                 mlir::SmallVector<mlir::Value> outputs(storeCount, val0);
                 idleState.getOutputOp()->setOperands(outputs);
@@ -461,14 +461,14 @@ circt::fsm::MachineOp CodeGen_CIRCT::Visitor::create_store_memory_arbiter_fsm(ml
             mlir::Region &transitions = idleState.getTransitions();
             mlir::ImplicitLocOpBuilder transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
             {
-                circt::fsm::TransitionOp transition = transitionsBuilder.create<circt::fsm::TransitionOp>(storePrefix + "_busy");
+                circt::fsm::TransitionOp transition = transitionsBuilder.create<circt::fsm::TransitionOp>(storePrefix + "_BUSY");
                 transition.ensureGuard(transitionsBuilder);
                 circt::fsm::ReturnOp returnOp = transition.getGuardReturn();
                 returnOp.setOperand(machineOP.getArgument(i));
             }
         }
         {
-            circt::fsm::StateOp busyState = fsmBuilder.create<circt::fsm::StateOp>(storePrefix + "_busy");
+            circt::fsm::StateOp busyState = fsmBuilder.create<circt::fsm::StateOp>(storePrefix + "_BUSY");
             {
                 mlir::SmallVector<mlir::Value> outputs(storeCount, val0);
                 busyState.getOutputOp()->setOperands(outputs);
@@ -476,14 +476,14 @@ circt::fsm::MachineOp CodeGen_CIRCT::Visitor::create_store_memory_arbiter_fsm(ml
             mlir::Region &transitions = busyState.getTransitions();
             mlir::ImplicitLocOpBuilder transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
             {
-                circt::fsm::TransitionOp transition = transitionsBuilder.create<circt::fsm::TransitionOp>(storePrefix + "_done");
+                circt::fsm::TransitionOp transition = transitionsBuilder.create<circt::fsm::TransitionOp>(storePrefix + "_DONE");
                 transition.ensureGuard(transitionsBuilder);
                 circt::fsm::ReturnOp returnOp = transition.getGuardReturn();
                 returnOp.setOperand(machineOP.getArgument(storeCount)); // axi_bvalid
             }
         }
         {
-            circt::fsm::StateOp doneState = fsmBuilder.create<circt::fsm::StateOp>(storePrefix + "_done");
+            circt::fsm::StateOp doneState = fsmBuilder.create<circt::fsm::StateOp>(storePrefix + "_DONE");
             {
                 mlir::SmallVector<mlir::Value> outputs(storeCount, val0);
                 outputs[i] = val1;
@@ -822,14 +822,16 @@ void CodeGen_CIRCT::Visitor::visit(const For *op) {
     codegen(op->body);
     sym_pop(op->name);
 
-    // An iteration can advance when: 1) all the inner loops have finished and 2) all memory accesses in the loop body have finished
-    builder.create<circt::sv::AssignOp>(clk_en, loop_done);
-
     // Update signal for outer loops to know this inner loop has finished
     loop_done = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq, loop_var, to_signless(max));
+
+    // There was at least one store in the loop. The last store having finished is a condition to go to the next iteration
     if (prevStoreIdx != curStoreIdx) {
-        // TODO: loop_done = builder.create<circt::comb::AndOp>(loop_done, store[curStore].done);
+        loop_done = builder.create<circt::comb::AndOp>(loop_done, storeDoneSignals[curStoreIdx - 1]);
     }
+
+    // An iteration can advance when: 1) all the inner loops have finished and 2) all memory accesses in the loop body have finished
+    builder.create<circt::sv::AssignOp>(clk_en, loop_done);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Store *op) {
