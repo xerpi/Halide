@@ -28,7 +28,7 @@ public:
 protected:
     class Visitor : public IRVisitor {
     public:
-        Visitor(mlir::ImplicitLocOpBuilder &builder, const Internal::LoweredFunc &function);
+        Visitor(mlir::ImplicitLocOpBuilder &builder, const Internal::LoweredFunc &function, const std::vector<std::string> &inputNames);
 
     protected:
         mlir::Value codegen(const Expr &);

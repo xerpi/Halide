@@ -138,8 +138,10 @@ if (TARGET_CIRCT AND CIRCT_FOUND)
                                ${CIRCT_INCLUDE_DIRS})
     target_link_libraries(Halide_LLVM INTERFACE
                           CIRCTCalyx
+                          CIRCTExportCalyx
                           CIRCTSCFToCalyx
-                          MLIRIR)
+                          MLIRIR
+                          MLIRSCFTransforms)
 endif ()
 
 # Link LLVM libraries to Halide_LLVM, depending on shared, static, or bundled selection.
