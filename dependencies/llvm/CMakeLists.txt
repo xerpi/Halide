@@ -137,17 +137,8 @@ if (TARGET_CIRCT AND CIRCT_FOUND)
                                ${MLIR_INCLUDE_DIRS}
                                ${CIRCT_INCLUDE_DIRS})
     target_link_libraries(Halide_LLVM INTERFACE
-                          CIRCTComb
-                          CIRCTExportVerilog
-                          CIRCTFSM
-                          CIRCTFSMToSV
-                          CIRCTHW
-                          CIRCTHWArith
-                          CIRCTHWArithToHW
-                          CIRCTSeq
-                          CIRCTSeqTransforms
-                          CIRCTSV
-                          CIRCTSVTransforms
+                          CIRCTCalyx
+                          CIRCTSCFToCalyx
                           MLIRIR)
 endif ()
 
