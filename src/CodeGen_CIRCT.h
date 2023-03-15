@@ -104,12 +104,38 @@ protected:
         mlir::Value to_signless(const mlir::Value &value);
 
     private:
+        class WaitRegion {
+        public:
+            WaitRegion(mlir::ImplicitLocOpBuilder &builder) : builder(builder) {}
+            mlir::Value getDoneSignal() { return doneSignal; }
+        protected:
+            mlir::ImplicitLocOpBuilder &builder;
+            mlir::Value doneSignal;
+        };
+
+        class WaitRegionDone : public WaitRegion {
+        public:
+            WaitRegionDone(mlir::ImplicitLocOpBuilder &builder);
+        };
+
+        class WaitRegionStore : public WaitRegion {
+        public:
+            WaitRegionStore(mlir::ImplicitLocOpBuilder &builder, mlir::Value enableSignal);
+        };
+
+        class WaitRegionFor : public WaitRegion {
+        public:
+            WaitRegionFor(mlir::ImplicitLocOpBuilder &builder, mlir::Value enableSignal, const For *op, mlir::Value min, mlir::Value max,
+                          mlir::Value clock, mlir::Value reset);
+        };
+
         static circt::fsm::MachineOp create_store_memory_arbiter_fsm(mlir::ImplicitLocOpBuilder &builder, uint64_t storeCount);
 
         mlir::ImplicitLocOpBuilder &builder;
         CirctGlobalTypes &globalTypes;
         mlir::Value value;
         mlir::Value loop_done;
+        WaitRegion lastWaitRegion;
         std::vector<circt::sv::WireOp> storeEnableSignals;
         std::vector<mlir::Value> storeDoneSignals;
         uint64_t curStoreIdx = 0;

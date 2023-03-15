@@ -174,7 +174,7 @@ void CodeGen_CIRCT::create_circt_definitions(CirctGlobalTypes &globalTypes, mlir
 }
 
 CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, CirctGlobalTypes &globalTypes, const Internal::LoweredFunc &function)
-    : builder(builder), globalTypes(globalTypes) {
+    : builder(builder), globalTypes(globalTypes), lastWaitRegion(WaitRegionDone(builder)) {
 
     // Generate module ports (inputs and outputs)
     mlir::SmallVector<circt::hw::PortInfo> ports;
@@ -500,6 +500,38 @@ circt::fsm::MachineOp CodeGen_CIRCT::Visitor::create_store_memory_arbiter_fsm(ml
     return machineOP;
 }
 
+CodeGen_CIRCT::Visitor::WaitRegionDone::WaitRegionDone(mlir::ImplicitLocOpBuilder &builder) : WaitRegion(builder) {
+    doneSignal = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(true));
+}
+
+CodeGen_CIRCT::Visitor::WaitRegionStore::WaitRegionStore(mlir::ImplicitLocOpBuilder &builder, mlir::Value enableSignal) : WaitRegion(builder) {
+
+}
+
+CodeGen_CIRCT::Visitor::WaitRegionFor::WaitRegionFor(mlir::ImplicitLocOpBuilder &builder, mlir::Value enableSignal,
+                                                     const For *op, mlir::Value min, mlir::Value max,
+                                                     mlir::Value clock, mlir::Value reset) : WaitRegion(builder) {
+    mlir::Value clockEnable = builder.create<circt::sv::LogicOp>(builder.getI1Type(), op->name + "_next_en");
+    mlir::Value clockEnableRead = builder.create<circt::sv::ReadInOutOp>(clockEnable);
+
+    mlir::Type type = builder.getIntegerType(max.getType().getIntOrFloatBitWidth());
+    mlir::Value minSignless = builder.create<circt::hwarith::CastOp>(type, min);
+    mlir::Value maxSignless = builder.create<circt::hwarith::CastOp>(type, max);
+
+    mlir::Value loopVarNext = builder.create<circt::sv::LogicOp>(type, op->name + "_next_val");
+    mlir::Value loopVarNextRead = builder.create<circt::sv::ReadInOutOp>(loopVarNext);
+    mlir::Value loopVar = builder.create<circt::seq::CompRegClockEnabledOp>(loopVarNextRead, clock, enableSignal, reset, minSignless, op->name);
+
+    // Increment loop variable by 1
+    mlir::Value const_1 = builder.create<circt::hw::ConstantOp>(builder.getIntegerAttr(type, 1));
+    mlir::Value loopVarAdd_1 = builder.create<circt::comb::AddOp>(loopVar, const_1);
+    builder.create<circt::sv::AssignOp>(loopVarNext, loopVarAdd_1);
+
+    // Update signal for outer loops to know this inner loop has finished
+    doneSignal = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq, loopVar, maxSignless);
+}
+
+
 mlir::Value CodeGen_CIRCT::Visitor::codegen(const Expr &e) {
     internal_assert(e.defined());
     debug(4) << "Codegen (E): " << e.type() << ", " << e << "\n";
@@ -794,36 +826,36 @@ void CodeGen_CIRCT::Visitor::visit(const For *op) {
 
     mlir::Value clk = sym_get("clk");
     mlir::Value reset = sym_get("reset");
-    mlir::Value clk_en = builder.create<circt::sv::LogicOp>(builder.getI1Type(), op->name + "_next_en");
-    mlir::Value clk_en_read = builder.create<circt::sv::ReadInOutOp>(clk_en);
+    mlir::Value clkEn = builder.create<circt::sv::LogicOp>(builder.getI1Type(), op->name + "_next_en");
+    mlir::Value clkEn_read = builder.create<circt::sv::ReadInOutOp>(clkEn);
 
     mlir::Value min = codegen(op->min);
     mlir::Value extent = codegen(op->extent);
     mlir::Value max = builder.create<circt::hwarith::AddOp>(mlir::ValueRange{min, extent});
     mlir::Type type = builder.getIntegerType(max.getType().getIntOrFloatBitWidth());
-    mlir::Value min_signless = builder.create<circt::hwarith::CastOp>(type, min);
+    mlir::Value minSignless = builder.create<circt::hwarith::CastOp>(type, min);
 
-    mlir::Value loop_var_next = builder.create<circt::sv::LogicOp>(type, op->name + "_next_val");
-    mlir::Value loop_var_next_read = builder.create<circt::sv::ReadInOutOp>(loop_var_next);
-    mlir::Value loop_var = builder.create<circt::seq::CompRegClockEnabledOp>(loop_var_next_read, clk, clk_en_read, reset, min_signless, op->name);
-    mlir::Value loop_var_with_sign = builder.create<circt::hwarith::CastOp>(max.getType(), loop_var);
+    mlir::Value loopVarNext = builder.create<circt::sv::LogicOp>(type, op->name + "_next_val");
+    mlir::Value loopVarNextRead = builder.create<circt::sv::ReadInOutOp>(loopVarNext);
+    mlir::Value loopVar = builder.create<circt::seq::CompRegClockEnabledOp>(loopVarNextRead, clk, clkEn_read, reset, minSignless, op->name);
+    mlir::Value loopVarWithSign = builder.create<circt::hwarith::CastOp>(max.getType(), loopVar);
 
     // Increment loop variable by 1
     mlir::Value const_1 = builder.create<circt::hw::ConstantOp>(type, builder.getIntegerAttr(type, 1));
-    mlir::Value loop_var_add_1 = builder.create<circt::comb::AddOp>(loop_var, const_1);
-    builder.create<circt::sv::AssignOp>(loop_var_next, loop_var_add_1);
+    mlir::Value loopVarAdd_1 = builder.create<circt::comb::AddOp>(loopVar, const_1);
+    builder.create<circt::sv::AssignOp>(loopVarNext, loopVarAdd_1);
 
     // Inner loops will update this signal
     loop_done = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(true));
 
     uint64_t prevStoreIdx = curStoreIdx;
 
-    sym_push(op->name, loop_var_with_sign);
+    sym_push(op->name, loopVarWithSign);
     codegen(op->body);
     sym_pop(op->name);
 
     // Update signal for outer loops to know this inner loop has finished
-    loop_done = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq, loop_var, to_signless(max));
+    loop_done = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq, loopVar, to_signless(max));
 
     // There was at least one store in the loop. The last store having finished is a condition to go to the next iteration
     if (prevStoreIdx != curStoreIdx) {
@@ -831,7 +863,7 @@ void CodeGen_CIRCT::Visitor::visit(const For *op) {
     }
 
     // An iteration can advance when: 1) all the inner loops have finished and 2) all memory accesses in the loop body have finished
-    builder.create<circt::sv::AssignOp>(clk_en, loop_done);
+    builder.create<circt::sv::AssignOp>(clkEn, loop_done);
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Store *op) {
