@@ -24,11 +24,12 @@ public:
     CodeGen_CIRCT();
 
     void compile(const Module &input);
+    static void generateKernelXml(const Internal::LoweredFunc &function);
 
 protected:
     class Visitor : public IRVisitor {
     public:
-        Visitor(mlir::ImplicitLocOpBuilder &builder, const Internal::LoweredFunc &function, const std::vector<std::string> &inputNames);
+        Visitor(mlir::ImplicitLocOpBuilder &builder, const std::vector<std::string> &inputNames);
 
     protected:
         mlir::Value codegen(const Expr &);

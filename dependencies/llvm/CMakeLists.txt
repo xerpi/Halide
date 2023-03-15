@@ -132,16 +132,25 @@ target_include_directories(Halide_LLVM INTERFACE "$<BUILD_INTERFACE:${LLVM_INCLU
 target_compile_definitions(Halide_LLVM INTERFACE ${Halide_LLVM_DEFS})
 
 if (TARGET_CIRCT AND CIRCT_FOUND)
+    find_package(tinyxml2 CONFIG REQUIRED)
+
     target_compile_definitions(Halide_LLVM INTERFACE WITH_CIRCT)
     target_include_directories(Halide_LLVM INTERFACE
                                ${MLIR_INCLUDE_DIRS}
                                ${CIRCT_INCLUDE_DIRS})
     target_link_libraries(Halide_LLVM INTERFACE
                           CIRCTCalyx
+                          CIRCTCalyxToFSM
+                          CIRCTCalyxToHW
                           CIRCTExportCalyx
+                          CIRCTExportVerilog
+                          CIRCTFSMToSV
+                          CIRCTHWTransforms
+                          CIRCTSeqTransforms
                           CIRCTSCFToCalyx
                           MLIRIR
-                          MLIRSCFTransforms)
+                          MLIRSCFTransforms
+                          tinyxml2::tinyxml2)
 endif ()
 
 # Link LLVM libraries to Halide_LLVM, depending on shared, static, or bundled selection.
