@@ -3,7 +3,9 @@
 
 #include <tinyxml2.h>
 
+#include <mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h>
 #include <mlir/Dialect/Arith/IR/Arith.h>
+#include <mlir/Dialect/ControlFlow/IR/ControlFlow.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/MemRef/IR/MemRef.h>
 #include <mlir/Dialect/SCF/IR/SCF.h>
@@ -48,13 +50,14 @@ CodeGen_CIRCT::CodeGen_CIRCT() {
     mlir_context.loadDialect<circt::hw::HWDialect>();
     mlir_context.loadDialect<circt::seq::SeqDialect>();
     mlir_context.loadDialect<mlir::arith::ArithDialect>();
+    mlir_context.loadDialect<mlir::cf::ControlFlowDialect>();
     mlir_context.loadDialect<mlir::func::FuncDialect>();
     mlir_context.loadDialect<mlir::memref::MemRefDialect>();
     mlir_context.loadDialect<mlir::scf::SCFDialect>();
 }
 
-void CodeGen_CIRCT::compile(const Module &input) {
-    debug(1) << "Generating CIRCT MLIR IR for module " << input.name() << "\n";
+void CodeGen_CIRCT::compile(const Module &module) {
+    debug(1) << "Generating CIRCT MLIR IR for module " << module.name() << "\n";
 
     circt::LoweringOptions opts;
     opts.emittedLineLength = 200;
@@ -72,11 +75,11 @@ void CodeGen_CIRCT::compile(const Module &input) {
     mlir::Type i64 = builder.getI64Type();
 
     // Translate each function into a Calyx component
-    std::vector<std::string> inputNames;
-    for (const auto &function : input.functions()) {
+    for (const auto &function : module.functions()) {
         std::cout << "Generating CIRCT MLIR IR for function " << function.name << std::endl;
 
         mlir::SmallVector<mlir::Type> inputs;
+        std::vector<std::string> inputNames;
         mlir::SmallVector<mlir::Type> results;
 
         for (const auto &arg: function.args) {
@@ -126,8 +129,6 @@ void CodeGen_CIRCT::compile(const Module &input) {
                 inputs.push_back(mlir::MemRefType::get({0}, builder.getIntegerType(arg.type.bits())));
                 inputNames.push_back(arg.name + ".buffer");
             }
-
-            generateKernelXml(function);
         }
 
         mlir::FunctionType functionType = builder.getFunctionType(inputs, results);
@@ -138,6 +139,8 @@ void CodeGen_CIRCT::compile(const Module &input) {
         function.body.accept(&visitor);
 
         builder.create<mlir::func::ReturnOp>();
+
+        generateKernelXml(function);
     }
 
     // Print MLIR before running passes
@@ -163,6 +166,7 @@ void CodeGen_CIRCT::compile(const Module &input) {
     // Print MLIR after running passes
     std::cout << "MLIR after running passes to Calyx" << std::endl;
     mlir_module.dump();
+    internal_assert(pmToCalyxRunResult.succeeded());
 
     // Emit Calyx
     if (pmToCalyxRunResult.succeeded()) {
@@ -197,6 +201,7 @@ void CodeGen_CIRCT::compile(const Module &input) {
     // Print MLIR after running passes
     std::cout << "MLIR after running passes to SystemVerilog" << std::endl;
     mlir_module.dump();
+    internal_assert(pmToSVRunResult.succeeded());
 
     // Verify module (after running passes)
     moduleVerifyResult = mlir::verify(mlir_module);
@@ -206,7 +211,7 @@ void CodeGen_CIRCT::compile(const Module &input) {
     // Emit Verilog
     if (pmToCalyxRunResult.succeeded()) {
         std::cout << "Exporting Verilog." << std::endl;
-        auto exportVerilogResult = circt::exportSplitVerilog(mlir_module, "gen/");
+        auto exportVerilogResult = circt::exportSplitVerilog(mlir_module, module.name() + "_generated");
         std::cout << "Export Verilog result: " << exportVerilogResult.succeeded() << std::endl;
     }
 
@@ -290,14 +295,21 @@ void CodeGen_CIRCT::generateKernelXml(const Internal::LoweredFunc &function) {
     for (const auto &arg: function.args) {
         if (arg.is_scalar() && arg.type.is_int_or_uint()) {
             pArgs->InsertEndChild(genArg(arg.name, 0, argIdx++, "s_axi_control", arg.type.bytes(),
-                                  argOffset, genTypeStr(arg.type), 0, arg.type.bytes()));
-            argOffset += 8;
+                                  argOffset += 8, genTypeStr(arg.type), 0, arg.type.bytes()));
         } else if (arg.is_buffer()) {
             pPorts->InsertEndChild(genPort(genAxiPortName(bufCnt), "master", std::numeric_limits<uint64_t>::max(), 512));
-            pArgs->InsertEndChild(genArg(arg.name + "_ptr", 1, argIdx++, genAxiPortName(bufCnt), 8,
-                                  argOffset, genTypeStr(arg.type) + "*", 0, arg.type.bytes()));
+            pArgs->InsertEndChild(genArg(arg.name + "_host", 1, argIdx++, genAxiPortName(bufCnt), 8,
+                                  argOffset += 8, genTypeStr(arg.type) + "*", 0, 8));
+            pArgs->InsertEndChild(genArg(arg.name + "_dimensions", 0, argIdx++, "s_axi_control", 4, argOffset += 8, "int", 0, 4));
+            for (int i = 0; i < arg.dimensions; i++) {
+                pArgs->InsertEndChild(genArg(arg.name + "_dim_" + std::to_string(i) + "_min", 0,
+                                      argIdx++, "s_axi_control", 4, argOffset += 8, "int", 0, 4));
+                pArgs->InsertEndChild(genArg(arg.name + "_dim_" + std::to_string(i) + "_extent", 0,
+                                      argIdx++, "s_axi_control", 4, argOffset += 8, "int", 0, 4));
+                pArgs->InsertEndChild(genArg(arg.name + "_dim_" + std::to_string(i) + "_stride", 0,
+                                      argIdx++, "s_axi_control", 4, argOffset += 8, "int", 0, 4));
+            }
             bufCnt++;
-            argOffset += 8;
         }
     }
 
@@ -531,15 +543,29 @@ void CodeGen_CIRCT::Visitor::visit(const Not *op) {
 void CodeGen_CIRCT::Visitor::visit(const Select *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
 
+    mlir::Value trueValue = codegen(op->true_value);
+    mlir::Value falseValue = codegen(op->false_value);
 
+   // mlir::Block *trueBlock = builder.createBlock();
+
+   // builder.getLoc()
 #if 0
-    mlir::Value condition = codegen(op->condition);
+    value = builder.create<mlir::cf::CondBranchOp>(
+        codegen(op->condition),
+        /*thenBuilder=*/
+        [&](mlir::OpBuilder &b, mlir::Location loc) {
+          b.create<mlir::scf::YieldOp>(loc, trueValue);
+        },
+        /*elseBuilder=*/
+        [&](mlir::OpBuilder &b, mlir::Location loc) {
+          b.create<mlir::scf::YieldOp>(loc, falseValue);
+        }).getResult(0);
+#endif
+#if 0
     mlir::IntegerAttr allOnesAttr = builder.getIntegerAttr(condition.getType(),
         llvm::APInt::getAllOnes(condition.getType().getIntOrFloatBitWidth()));
     mlir::Value allOnes = builder.create<mlir::arith::ConstantOp>(allOnesAttr);
     mlir::Value conditionNeg = builder.create<circt::comb::XorOp>(condition, allOnes);
-    mlir::Value trueValue = codegen(op->true_value);
-    mlir::Value falseValue = codegen(op->false_value);
 
     builder.create<circt::calyx::AssignOp>(value, trueValue, condition);
     builder.create<circt::calyx::AssignOp>(value, falseValue, conditionNeg);
