@@ -149,6 +149,7 @@ if (TARGET_CIRCT AND CIRCT_FOUND)
                           CIRCTSeqTransforms
                           CIRCTSCFToCalyx
                           MLIRIR
+                          MLIRSCFToControlFlow
                           MLIRSCFTransforms
                           tinyxml2::tinyxml2)
 endif ()

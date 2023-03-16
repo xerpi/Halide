@@ -23,7 +23,7 @@ class CodeGen_CIRCT {
 public:
     CodeGen_CIRCT();
 
-    void compile(const Module &input);
+    void compile(const Module &module);
     static void generateKernelXml(const Internal::LoweredFunc &function);
 
 protected:
