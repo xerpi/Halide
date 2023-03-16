@@ -81,6 +81,8 @@ void CodeGen_CIRCT::compile(const Module &module) {
         mlir::SmallVector<mlir::Type> inputs;
         std::vector<std::string> inputNames;
         mlir::SmallVector<mlir::Type> results;
+        mlir::SmallVector<mlir::NamedAttribute> attrs;
+        mlir::SmallVector<mlir::DictionaryAttr> argAttrs;
 
         for (const auto &arg: function.args) {
             static const char *const kind_names[] = {
@@ -122,17 +124,21 @@ void CodeGen_CIRCT::compile(const Module &module) {
 
                 for (const auto &entry: entries) {
                     inputs.push_back(entry.type);
-                    inputNames.push_back(arg.name + "_" + entry.suffix);
+                    const std::string name = arg.name + "_" + entry.suffix;
+                    inputNames.push_back(name);
+                    argAttrs.push_back(builder.getDictionaryAttr(builder.getNamedAttr("calyx.port_name", builder.getStringAttr(name))));
                 }
 
                 // Treat buffers as 1D
                 inputs.push_back(mlir::MemRefType::get({0}, builder.getIntegerType(arg.type.bits())));
-                inputNames.push_back(arg.name + ".buffer");
+                const std::string name = arg.name + ".buffer";
+                inputNames.push_back(name);
+                argAttrs.push_back(builder.getDictionaryAttr(builder.getNamedAttr("calyx.port_name", builder.getStringAttr(name))));
             }
         }
 
         mlir::FunctionType functionType = builder.getFunctionType(inputs, results);
-        mlir::func::FuncOp functionOp = builder.create<mlir::func::FuncOp>(builder.getStringAttr(function.name), functionType);
+        mlir::func::FuncOp functionOp = builder.create<mlir::func::FuncOp>(builder.getStringAttr(function.name), functionType, attrs, argAttrs);
         builder.setInsertionPointToStart(functionOp.addEntryBlock());
 
         CodeGen_CIRCT::Visitor visitor(builder, inputNames);
@@ -588,10 +594,14 @@ void CodeGen_CIRCT::Visitor::visit(const Load *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
     debug(1) << "\tName: " << op->name << "\n";
 
-    mlir::Value index = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), codegen(op->index));
-    mlir::Value buf = sym_get(op->name + ".buffer");
+    mlir::Value baseAddr = sym_get(op->name + "_host");
+    mlir::Value index = builder.create<mlir::arith::ExtUIOp>(builder.getI64Type(), codegen(op->index));
+    mlir::Value elementSize = builder.create<mlir::arith::ConstantOp>(builder.getI64IntegerAttr(op->type.bytes()));
+    mlir::Value offset = builder.create<mlir::arith::MulIOp>(index, elementSize);
+    mlir::Value loadAddress = builder.create<mlir::arith::AddIOp>(baseAddr, offset);
+    mlir::Value loadAddressAsIndex = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), loadAddress);
 
-    value = builder.create<mlir::memref::LoadOp>(buf, mlir::ValueRange{index});
+    value = builder.create<mlir::memref::LoadOp>(sym_get(op->name + ".buffer"), mlir::ValueRange{loadAddressAsIndex});
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Ramp *op) {
@@ -699,11 +709,14 @@ void CodeGen_CIRCT::Visitor::visit(const Store *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
     debug(1) << "\tName: " << op->name << "\n";
 
-    mlir::Value value = codegen(op->value);
-    mlir::Value index = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), codegen(op->index));
-    mlir::Value buf = sym_get(op->name + ".buffer");
+    mlir::Value baseAddr = sym_get(op->name + "_host");
+    mlir::Value index = builder.create<mlir::arith::ExtUIOp>(builder.getI64Type(), codegen(op->index));
+    mlir::Value elementSize = builder.create<mlir::arith::ConstantOp>(builder.getI64IntegerAttr(op->value.type().bytes()));
+    mlir::Value offset = builder.create<mlir::arith::MulIOp>(index, elementSize);
+    mlir::Value storeAddress = builder.create<mlir::arith::AddIOp>(baseAddr, offset);
+    mlir::Value storeAddressAsIndex = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), storeAddress);
 
-    builder.create<mlir::memref::StoreOp>(value, buf, mlir::ValueRange{index});
+    builder.create<mlir::memref::StoreOp>(codegen(op->value), sym_get(op->name + ".buffer"), mlir::ValueRange{storeAddressAsIndex});
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Provide *op) {
