@@ -126,14 +126,14 @@ void CodeGen_CIRCT::compile(const Module &module) {
                     inputs.push_back(entry.type);
                     const std::string name = arg.name + "_" + entry.suffix;
                     inputNames.push_back(name);
-                    argAttrs.push_back(builder.getDictionaryAttr(builder.getNamedAttr("calyx.port_name", builder.getStringAttr(name))));
+                    argAttrs.push_back(builder.getDictionaryAttr(builder.getNamedAttr(circt::scfToCalyx::sPortNameAttr, builder.getStringAttr(name))));
                 }
 
                 // Treat buffers as 1D
                 inputs.push_back(mlir::MemRefType::get({0}, builder.getIntegerType(arg.type.bits())));
                 const std::string name = arg.name + ".buffer";
                 inputNames.push_back(name);
-                argAttrs.push_back(builder.getDictionaryAttr(builder.getNamedAttr("calyx.port_name", builder.getStringAttr(name))));
+                argAttrs.push_back(builder.getDictionaryAttr(builder.getNamedAttr(circt::scfToCalyx::sPortNameAttr, builder.getStringAttr(name))));
             }
         }
 
