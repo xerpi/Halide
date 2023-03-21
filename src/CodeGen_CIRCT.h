@@ -24,6 +24,7 @@ public:
     CodeGen_CIRCT();
 
     void compile(const Module &module);
+    void createCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder);
     static void generateKernelXml(const Internal::LoweredFunc &function);
 
 protected:

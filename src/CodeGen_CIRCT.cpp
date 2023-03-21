@@ -167,23 +167,23 @@ void CodeGen_CIRCT::compile(const Module &module) {
     internal_assert(moduleVerifyResult.succeeded());
 
     // Create and run passes
-    std::cout << "Running passes to Calyx." << std::endl;
-    mlir::PassManager pmToCalyx(mlir_module.getContext());
-    pmToCalyx.addPass(mlir::createForToWhileLoopPass());
-    pmToCalyx.addPass(mlir::createCanonicalizerPass());
-    pmToCalyx.addPass(circt::createSCFToCalyxPass());
-    pmToCalyx.addPass(mlir::createCanonicalizerPass());
+    std::cout << "[SCF to Calyx] Start." << std::endl;
+    mlir::PassManager pmSCFToCalyx(mlir_module.getContext());
+    pmSCFToCalyx.addPass(mlir::createForToWhileLoopPass());
+    pmSCFToCalyx.addPass(mlir::createCanonicalizerPass());
+    pmSCFToCalyx.addPass(circt::createSCFToCalyxPass());
+    pmSCFToCalyx.addPass(mlir::createCanonicalizerPass());
 
-    auto pmToCalyxRunResult = pmToCalyx.run(mlir_module);
-    std::cout << "Passes to Calyx result: " << pmToCalyxRunResult.succeeded() << std::endl;
+    auto pmSCFToCalyxRunResult = pmSCFToCalyx.run(mlir_module);
+    std::cout << "[SCF to Calyx] Result: " << pmSCFToCalyxRunResult.succeeded() << std::endl;
 
     // Print MLIR after running passes
-    std::cout << "MLIR after running passes to Calyx" << std::endl;
+    std::cout << "[SCF to Calyx] MLIR:" << std::endl;
     mlir_module.dump();
-    internal_assert(pmToCalyxRunResult.succeeded());
+    internal_assert(pmSCFToCalyxRunResult.succeeded());
 
     // Emit Calyx
-    if (pmToCalyxRunResult.succeeded()) {
+    if (pmSCFToCalyxRunResult.succeeded()) {
         std::string str;
         llvm::raw_string_ostream os(str);
         std::cout << "Exporting Calyx." << std::endl;
@@ -192,44 +192,354 @@ void CodeGen_CIRCT::compile(const Module &module) {
         std::cout << str << std::endl;
     }
 
-    std::cout << "Running passes to SystemVerilog." << std::endl;
-    mlir::PassManager pmToSV(mlir_module.getContext());
-    pmToSV.nest<circt::calyx::ComponentOp>().addPass(circt::calyx::createRemoveCombGroupsPass());
-    pmToSV.addPass(mlir::createCanonicalizerPass());
-    pmToSV.nest<circt::calyx::ComponentOp>().addPass(circt::createCalyxToFSMPass());
-    pmToSV.addPass(mlir::createCanonicalizerPass());
-    pmToSV.nest<circt::calyx::ComponentOp>().addPass(circt::createMaterializeCalyxToFSMPass());
-    pmToSV.addPass(mlir::createCanonicalizerPass());
-    pmToSV.nest<circt::calyx::ComponentOp>().addPass(circt::createRemoveGroupsFromFSMPass());
-    pmToSV.addPass(mlir::createCanonicalizerPass());
-    pmToSV.addPass(circt::createCalyxToHWPass());
-    pmToSV.addPass(mlir::createCanonicalizerPass());
-    pmToSV.addPass(circt::createConvertFSMToSVPass());
-    pmToSV.addPass(mlir::createCanonicalizerPass());
-    pmToSV.addPass(circt::seq::createSeqLowerToSVPass());
-    pmToSV.addPass(mlir::createCanonicalizerPass());
+    std::cout << "[Calyx to FSM] Start." << std::endl;
+    mlir::PassManager pmCalyxToFSM(mlir_module.getContext());
+    pmCalyxToFSM.nest<circt::calyx::ComponentOp>().addPass(circt::calyx::createRemoveCombGroupsPass());
+    pmCalyxToFSM.addPass(mlir::createCanonicalizerPass());
+    pmCalyxToFSM.nest<circt::calyx::ComponentOp>().addPass(circt::createCalyxToFSMPass());
+    pmCalyxToFSM.addPass(mlir::createCanonicalizerPass());
+    pmCalyxToFSM.nest<circt::calyx::ComponentOp>().addPass(circt::createMaterializeCalyxToFSMPass());
+    pmCalyxToFSM.addPass(mlir::createCanonicalizerPass());
+    pmCalyxToFSM.nest<circt::calyx::ComponentOp>().addPass(circt::createRemoveGroupsFromFSMPass());
+    pmCalyxToFSM.addPass(mlir::createCanonicalizerPass());
+    pmCalyxToFSM.addPass(circt::createCalyxToHWPass());
+    pmCalyxToFSM.addPass(mlir::createCanonicalizerPass());
 
-    auto pmToSVRunResult = pmToSV.run(mlir_module);
-    std::cout << "Passes to SystemVerilog result: " << pmToSVRunResult.succeeded() << std::endl;
+    auto pmCalyxToFSMRunResult = pmCalyxToFSM.run(mlir_module);
+    std::cout << "[Calyx to FSM] Result: " << pmCalyxToFSMRunResult.succeeded() << std::endl;
 
     // Print MLIR after running passes
-    std::cout << "MLIR after running passes to SystemVerilog" << std::endl;
+    std::cout << "[Calyx to FSM] MLIR:" << std::endl;
     mlir_module.dump();
-    internal_assert(pmToSVRunResult.succeeded());
+    internal_assert(pmCalyxToFSMRunResult.succeeded());
 
-    // Verify module (after running passes)
-    moduleVerifyResult = mlir::verify(mlir_module);
-    std::cout << "Module verify (after passes) result: " << moduleVerifyResult.succeeded() << std::endl;
-    internal_assert(moduleVerifyResult.succeeded());
+    // Create Calyx external memory to AXI interface
+    builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
+    createCalyxExtMemToAXI(builder);
+    std::cout << "[Adding CalyxExtMemToAXI] MLIR:" << std::endl;
+    mlir_module.dump();
+
+    std::cout << "[FSM to SV] Start." << std::endl;
+    mlir::PassManager pmFSMtoSV(mlir_module.getContext());
+    pmFSMtoSV.addPass(circt::createConvertFSMToSVPass());
+    pmFSMtoSV.addPass(mlir::createCanonicalizerPass());
+    pmFSMtoSV.addPass(circt::seq::createSeqLowerToSVPass());
+    pmFSMtoSV.addPass(mlir::createCanonicalizerPass());
+
+    auto pmFSMtoSVRunResult = pmFSMtoSV.run(mlir_module);
+    std::cout << "[FSM to SV] Result: " << pmFSMtoSVRunResult.succeeded() << std::endl;
+
+    // Print MLIR after running passes
+    std::cout << "[FSM to SV] MLIR:" << std::endl;
+    mlir_module.dump();
+    internal_assert(pmFSMtoSVRunResult.succeeded());
 
     // Emit Verilog
-    if (pmToCalyxRunResult.succeeded()) {
+    if (pmFSMtoSVRunResult.succeeded()) {
         std::cout << "Exporting Verilog." << std::endl;
         auto exportVerilogResult = circt::exportSplitVerilog(mlir_module, "generated_" + module.name());
         std::cout << "Export Verilog result: " << exportVerilogResult.succeeded() << std::endl;
     }
 
     std::cout << "Done!" << std::endl;
+}
+
+#if 0
+  // AXI4 master interface (read)
+  output wire                          m_axi_arvalid,
+  input  wire                          m_axi_arready,
+  output wire [C_M_AXI_ADDR_WIDTH-1:0] m_axi_araddr,
+  output wire [8-1:0]                  m_axi_arlen,
+
+  input  wire                          m_axi_rvalid,
+  output wire                          m_axi_rready,
+  input  wire [C_M_AXI_DATA_WIDTH-1:0] m_axi_rdata,
+  input  wire                          m_axi_rlast,
+  // AXI4 master interface (write)
+  output wire                            m_axi_awvalid,
+  input  wire                            m_axi_awready,
+  output wire [C_M_AXI_ADDR_WIDTH-1:0]   m_axi_awaddr,
+  output wire [7:0]                      m_axi_awlen,
+
+  output wire                            m_axi_wvalid,
+  input  wire                            m_axi_wready,
+  output wire [C_M_AXI_DATA_WIDTH-1:0]   m_axi_wdata,
+  output wire [C_M_AXI_DATA_WIDTH/8-1:0] m_axi_wstrb,
+  output wire                            m_axi_wlast,
+
+  input  wire                            m_axi_bvalid,
+  output wire                            m_axi_bready,
+#endif
+
+void CodeGen_CIRCT::createCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder) {
+    static constexpr int AXI_DATA_WIDTH = 32;
+    struct AxiSignalInfo {
+        std::string name;
+        mlir::Type type;
+        circt::hw::PortDirection direction;
+    };
+
+    // araddr, awaddr, wdata and rdata are connected directly outside the FSM module
+    const mlir::SmallVector<AxiSignalInfo> axiSignals = {
+        // AXI4 master interface (read)
+        // Read address channel
+        {"arvalid", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+        {"arready", builder.getI1Type(), circt::hw::PortDirection::INPUT},
+        {"arlen", builder.getI8Type(), circt::hw::PortDirection::OUTPUT},
+        // Read data channel
+        {"rvalid", builder.getI1Type(), circt::hw::PortDirection::INPUT},
+        {"rready", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+        {"rlast", builder.getI1Type(), circt::hw::PortDirection::INPUT},
+        // AXI4 master interface (write)
+        // Write address channel
+        {"awvalid", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+        {"awready", builder.getI1Type(), circt::hw::PortDirection::INPUT},
+        {"awlen", builder.getI8Type(), circt::hw::PortDirection::OUTPUT},
+        // Write data channel
+        {"wvalid", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+        {"wready", builder.getI1Type(), circt::hw::PortDirection::INPUT},
+        {"wstrb", builder.getIntegerType(AXI_DATA_WIDTH / 8), circt::hw::PortDirection::OUTPUT},
+        {"wlast", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+        // Write response channel
+        {"bvalid", builder.getI1Type(), circt::hw::PortDirection::INPUT},
+        {"bready", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
+    };
+
+    auto toFullAxiSignalName = [](const std::string &name) {
+        return "m_axi_" + name;
+    };
+
+    mlir::SmallVector<mlir::Type> inputs;
+    mlir::SmallVector<mlir::Attribute> inputNames;
+    mlir::SmallVector<mlir::Type> outputs;
+    mlir::SmallVector<mlir::Attribute> outputNames;
+
+    // First add AXI signals
+    for (const auto &signal : axiSignals) {
+        if (signal.direction == circt::hw::PortDirection::INPUT) {
+            inputs.push_back(signal.type);
+            inputNames.push_back(builder.getStringAttr(toFullAxiSignalName(signal.name)));
+        } else {
+            outputs.push_back(signal.type);
+            outputNames.push_back(builder.getStringAttr(toFullAxiSignalName(signal.name)));
+        }
+    }
+
+    // Then add Calyx external memory interface signals
+    size_t calyxReadEnSignalIndex = inputs.size();
+    inputs.push_back(builder.getI1Type());
+    inputNames.push_back(builder.getStringAttr("calyx_read_en"));
+    size_t calyxWriteEnSignalIndex = inputs.size();
+    inputs.push_back(builder.getI1Type());
+    inputNames.push_back(builder.getStringAttr("calyx_write_en"));
+    size_t calyxDoneSignalIndex = outputs.size();
+    outputs.push_back(builder.getI1Type());
+    outputNames.push_back(builder.getStringAttr("calyx_done"));
+
+#if 0
+    hw.module @f0(
+        % ext_mem0_read_data: i32,
+        % ext_mem0_done : i1)
+        ->(ext_mem0_write_data: i32,
+           ext_mem0_addr0 : i64,
+           ext_mem0_write_en: i1,
+           ext_mem0_read_en: i1) {
+#endif
+
+    mlir::FunctionType fsmFunctionType = builder.getFunctionType(inputs, outputs);
+    circt::fsm::MachineOp machineOp = builder.create<circt::fsm::MachineOp>("CalyxExtMemToAXI", "IDLE", fsmFunctionType);
+    machineOp.setArgNamesAttr(builder.getArrayAttr(inputNames));
+    machineOp.setResNamesAttr(builder.getArrayAttr(outputNames));
+
+    mlir::Region &fsmBody = machineOp.getBody();
+    mlir::ImplicitLocOpBuilder fsmBuilder = mlir::ImplicitLocOpBuilder::atBlockEnd(fsmBody.getLoc(), &fsmBody.front());
+
+    mlir::Value value0 = fsmBuilder.create<circt::hw::ConstantOp>(fsmBuilder.getBoolAttr(false));
+    mlir::SmallVector<mlir::Value> outputValues(machineOp.getNumResults());
+
+    auto getAxiInputValue = [&](const std::string &name) {
+        for (unsigned int i = 0; i < machineOp.getNumArguments(); i++) {
+            if (machineOp.getArgName(i) == toFullAxiSignalName(name))
+                return machineOp.getArgument(i);
+        }
+        return mlir::BlockArgument();
+    };
+
+    auto getAxiOutputIndex = [&](const std::string &name) {
+        unsigned int i = 0;
+        for (i = 0; i < machineOp.getNumResults(); i++) {
+            if (machineOp.getResName(i) == toFullAxiSignalName(name))
+                return i;
+        }
+        return i;
+    };
+
+    auto getAxiOutputType = [&](const std::string &name) {
+        for (unsigned int i = 0; i < machineOp.getNumResults(); i++) {
+            if (machineOp.getResName(i) == toFullAxiSignalName(name))
+                return machineOp.getResultTypes()[i];
+        }
+        return mlir::Type();
+    };
+
+    auto createAxiOutputConstantOp = [&](const std::string &name, int64_t value) {
+        return builder.create<circt::hw::ConstantOp>(getAxiOutputType(name), value);
+    };
+
+    auto setAxiOutputConstant = [&](const std::string &name, int64_t value) {
+        outputValues[getAxiOutputIndex(name)] = createAxiOutputConstantOp(name, value);
+    };
+
+    // Constant outputs
+    setAxiOutputConstant("arlen", 0);  // 1 transfer
+    setAxiOutputConstant("awlen", 0);  // 1 transfer
+    setAxiOutputConstant("wstrb", 0);
+    setAxiOutputConstant("wlast", 1);
+
+    {
+        circt::fsm::StateOp idleState = fsmBuilder.create<circt::fsm::StateOp>("IDLE");
+        {
+            setAxiOutputConstant("arvalid", 0);
+            setAxiOutputConstant("rready", 0);
+            setAxiOutputConstant("awvalid", 0);
+            setAxiOutputConstant("wvalid", 0);
+            setAxiOutputConstant("bready", 0);
+            outputValues[calyxDoneSignalIndex] = value0;
+            idleState.getOutputOp()->setOperands(outputValues);
+        }
+        mlir::Region &transitions = idleState.getTransitions();
+        mlir::ImplicitLocOpBuilder transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
+        {
+            {
+                circt::fsm::TransitionOp transition = transitionsBuilder.create<circt::fsm::TransitionOp>("AW_HANDSHAKE");
+                transition.ensureGuard(transitionsBuilder);
+                circt::fsm::ReturnOp returnOp = transition.getGuardReturn();
+                returnOp.setOperand(machineOp.getArgument(calyxWriteEnSignalIndex));
+            }
+
+            {
+                circt::fsm::TransitionOp transition = transitionsBuilder.create<circt::fsm::TransitionOp>("AR_HANDSHAKE");
+                transition.ensureGuard(transitionsBuilder);
+                circt::fsm::ReturnOp returnOp = transition.getGuardReturn();
+                returnOp.setOperand(machineOp.getArgument(calyxReadEnSignalIndex));
+            }
+        }
+    }
+
+    {
+        circt::fsm::StateOp idleState = fsmBuilder.create<circt::fsm::StateOp>("AW_HANDSHAKE");
+        {
+            setAxiOutputConstant("arvalid", 0);
+            setAxiOutputConstant("rready", 0);
+            setAxiOutputConstant("awvalid", 1);
+            setAxiOutputConstant("wvalid", 0);
+            setAxiOutputConstant("bready", 0);
+            outputValues[calyxDoneSignalIndex] = value0;
+            idleState.getOutputOp()->setOperands(outputValues);
+        }
+        mlir::Region &transitions = idleState.getTransitions();
+        mlir::ImplicitLocOpBuilder transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
+        {
+            {
+                circt::fsm::TransitionOp transition = transitionsBuilder.create<circt::fsm::TransitionOp>("W_HANDSHAKE");
+                transition.ensureGuard(transitionsBuilder);
+                circt::fsm::ReturnOp returnOp = transition.getGuardReturn();
+                returnOp.setOperand(getAxiInputValue("awready"));
+            }
+        }
+    }
+
+    {
+        circt::fsm::StateOp idleState = fsmBuilder.create<circt::fsm::StateOp>("W_HANDSHAKE");
+        {
+            setAxiOutputConstant("arvalid", 0);
+            setAxiOutputConstant("rready", 0);
+            setAxiOutputConstant("awvalid", 0);
+            setAxiOutputConstant("wvalid", 1);
+            setAxiOutputConstant("bready", 0);
+            outputValues[calyxDoneSignalIndex] = value0;
+            idleState.getOutputOp()->setOperands(outputValues);
+        }
+        mlir::Region &transitions = idleState.getTransitions();
+        mlir::ImplicitLocOpBuilder transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
+        {
+            {
+                circt::fsm::TransitionOp transition = transitionsBuilder.create<circt::fsm::TransitionOp>("B_WAIT");
+                transition.ensureGuard(transitionsBuilder);
+                circt::fsm::ReturnOp returnOp = transition.getGuardReturn();
+                returnOp.setOperand(getAxiInputValue("wready"));
+            }
+        }
+    }
+
+    {
+        circt::fsm::StateOp idleState = fsmBuilder.create<circt::fsm::StateOp>("B_WAIT");
+        {
+            setAxiOutputConstant("arvalid", 0);
+            setAxiOutputConstant("rready", 0);
+            setAxiOutputConstant("awvalid", 0);
+            setAxiOutputConstant("wvalid", 0);
+            setAxiOutputConstant("bready", 1);
+            outputValues[calyxDoneSignalIndex] = getAxiInputValue("bvalid");
+            idleState.getOutputOp()->setOperands(outputValues);
+        }
+        mlir::Region &transitions = idleState.getTransitions();
+        mlir::ImplicitLocOpBuilder transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
+        {
+            {
+                circt::fsm::TransitionOp transition = transitionsBuilder.create<circt::fsm::TransitionOp>("IDLE");
+                transition.ensureGuard(transitionsBuilder);
+                circt::fsm::ReturnOp returnOp = transition.getGuardReturn();
+                returnOp.setOperand(getAxiInputValue("bvalid"));
+            }
+        }
+    }
+
+    {
+        circt::fsm::StateOp idleState = fsmBuilder.create<circt::fsm::StateOp>("AR_HANDSHAKE");
+        {
+            setAxiOutputConstant("arvalid", 1);
+            setAxiOutputConstant("rready", 0);
+            setAxiOutputConstant("awvalid", 0);
+            setAxiOutputConstant("wvalid", 0);
+            setAxiOutputConstant("bready", 0);
+            outputValues[calyxDoneSignalIndex] = value0;
+            idleState.getOutputOp()->setOperands(outputValues);
+        }
+        mlir::Region &transitions = idleState.getTransitions();
+        mlir::ImplicitLocOpBuilder transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
+        {
+            {
+                circt::fsm::TransitionOp transition = transitionsBuilder.create<circt::fsm::TransitionOp>("R_HANDSHAKE");
+                transition.ensureGuard(transitionsBuilder);
+                circt::fsm::ReturnOp returnOp = transition.getGuardReturn();
+                returnOp.setOperand(getAxiInputValue("arready"));
+            }
+        }
+    }
+
+    {
+        circt::fsm::StateOp idleState = fsmBuilder.create<circt::fsm::StateOp>("R_HANDSHAKE");
+        {
+            setAxiOutputConstant("arvalid", 0);
+            setAxiOutputConstant("rready", 1);
+            setAxiOutputConstant("awvalid", 0);
+            setAxiOutputConstant("wvalid", 0);
+            setAxiOutputConstant("bready", 0);
+            outputValues[calyxDoneSignalIndex] = getAxiInputValue("rvalid");
+            idleState.getOutputOp()->setOperands(outputValues);
+        }
+        mlir::Region &transitions = idleState.getTransitions();
+        mlir::ImplicitLocOpBuilder transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
+        {
+            {
+                circt::fsm::TransitionOp transition = transitionsBuilder.create<circt::fsm::TransitionOp>("IDLE");
+                transition.ensureGuard(transitionsBuilder);
+                circt::fsm::ReturnOp returnOp = transition.getGuardReturn();
+                returnOp.setOperand(getAxiInputValue("rvalid"));
+            }
+        }
+    }
 }
 
 void CodeGen_CIRCT::generateKernelXml(const Internal::LoweredFunc &function) {
@@ -558,8 +868,8 @@ void CodeGen_CIRCT::Visitor::visit(const Not *op) {
 void CodeGen_CIRCT::Visitor::visit(const Select *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
 
-    mlir::Value trueValue = codegen(op->true_value);
-    mlir::Value falseValue = codegen(op->false_value);
+    // mlir::Value trueValue = codegen(op->true_value);
+    // mlir::Value falseValue = codegen(op->false_value);
 
     // mlir::Block *trueBlock = builder.createBlock();
 
