@@ -75,71 +75,68 @@ void CodeGen_CIRCT::compile(const Module &module) {
     opts.setAsAttribute(mlir_module);
     mlir::ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
 
-    // Translate each function into a Calyx component
-    for (const auto &function : module.functions()) {
-        std::cout << "Generating CIRCT MLIR IR for function " << function.name << std::endl;
+    const std::vector<Internal::LoweredFunc> &functions = module.functions();
+    assert(functions.size() == 1);
+    const auto &function = functions[0];
 
-        mlir::SmallVector<mlir::Type> inputs;
-        std::vector<std::string> inputNames;
-        mlir::SmallVector<mlir::Type> results;
-        mlir::SmallVector<mlir::NamedAttribute> attrs;
-        mlir::SmallVector<mlir::DictionaryAttr> argAttrs;
+    std::cout << "Generating CIRCT MLIR IR for function " << function.name << std::endl;
 
-        for (const auto &arg : function.args) {
-            static const char *const kind_names[] = {
-                "InputScalar",
-                "InputBuffer",
-                "OutputBuffer",
-            };
-            static const char *const type_code_names[] = {
-                "int",
-                "uint",
-                "float",
-                "handle",
-                "bfloat",
-            };
+    mlir::SmallVector<mlir::Type> inputs;
+    std::vector<std::string> inputNames;
+    mlir::SmallVector<mlir::Type> results;
+    mlir::SmallVector<mlir::NamedAttribute> attrs;
+    mlir::SmallVector<mlir::DictionaryAttr> argAttrs;
 
-            debug(1) << "\t\tArg: " << arg.name << "\n";
-            debug(1) << "\t\t\tKind: " << kind_names[arg.kind] << "\n";
-            debug(1) << "\t\t\tDimensions: " << int(arg.dimensions) << "\n";
-            debug(1) << "\t\t\tType: " << type_code_names[arg.type.code()] << "\n";
-            debug(1) << "\t\t\tType bits: " << arg.type.bits() << "\n";
-            debug(1) << "\t\t\tType lanes: " << arg.type.lanes() << "\n";
+    FlattenedKernelArgs flattenedKernelArgs;
+    flattenKernelArguments(function.args, flattenedKernelArgs);
 
-            if (arg.is_scalar() && arg.type.is_int_or_uint()) {
-                inputs.push_back(builder.getIntegerType(arg.type.bits(), arg.type.is_int()));
-                inputNames.push_back(arg.name);
-            } else if (arg.is_buffer()) {
-                CIRCTBufferDescriptor desc;
-                fillCIRCTBufferDescriptor(arg.name, arg.dimensions, desc);
-
-                for (const auto &field : desc) {
-                    inputs.push_back(builder.getIntegerType(field.size));
-                    inputNames.push_back(field.name);
-                    argAttrs.push_back(builder.getDictionaryAttr(
-                        builder.getNamedAttr(circt::scfToCalyx::sPortNameAttr, builder.getStringAttr(field.name))));
-                }
-
-                // Treat buffers as 1D
-                inputs.push_back(mlir::MemRefType::get({0}, builder.getIntegerType(arg.type.bits())));
-                const std::string name = arg.name + ".buffer";
-                inputNames.push_back(name);
-                argAttrs.push_back(builder.getDictionaryAttr(
-                    builder.getNamedAttr(circt::scfToCalyx::sSequentialReads, builder.getBoolAttr(true))));
-            }
-        }
-
-        mlir::FunctionType functionType = builder.getFunctionType(inputs, results);
-        mlir::func::FuncOp functionOp = builder.create<mlir::func::FuncOp>(builder.getStringAttr(function.name), functionType, attrs, argAttrs);
-        builder.setInsertionPointToStart(functionOp.addEntryBlock());
-
-        CodeGen_CIRCT::Visitor visitor(builder, inputNames);
-        function.body.accept(&visitor);
-
-        builder.create<mlir::func::ReturnOp>();
-
-        generateKernelXml(function);
+    for (const auto &arg : flattenedKernelArgs) {
+        inputs.push_back(builder.getIntegerType(arg.size));
+        inputNames.push_back(arg.name);
+        argAttrs.push_back(builder.getDictionaryAttr(
+            builder.getNamedAttr(circt::scfToCalyx::sPortNameAttr, builder.getStringAttr(arg.name))));
     }
+
+    for (const auto &arg : function.args) {
+        static const char *const kind_names[] = {
+            "InputScalar",
+            "InputBuffer",
+            "OutputBuffer",
+        };
+        static const char *const type_code_names[] = {
+            "int",
+            "uint",
+            "float",
+            "handle",
+            "bfloat",
+        };
+
+        debug(1) << "\t\tArg: " << arg.name << "\n";
+        debug(1) << "\t\t\tKind: " << kind_names[arg.kind] << "\n";
+        debug(1) << "\t\t\tDimensions: " << int(arg.dimensions) << "\n";
+        debug(1) << "\t\t\tType: " << type_code_names[arg.type.code()] << "\n";
+        debug(1) << "\t\t\tType bits: " << arg.type.bits() << "\n";
+        debug(1) << "\t\t\tType lanes: " << arg.type.lanes() << "\n";
+
+        if (arg.is_buffer()) {
+            // Treat buffers as 1D
+            inputs.push_back(mlir::MemRefType::get({0}, builder.getIntegerType(arg.type.bits())));
+            inputNames.push_back(arg.name + ".buffer");
+            argAttrs.push_back(builder.getDictionaryAttr(
+                builder.getNamedAttr(circt::scfToCalyx::sSequentialReads, builder.getBoolAttr(true))));
+        }
+    }
+
+    mlir::FunctionType functionType = builder.getFunctionType(inputs, results);
+    mlir::func::FuncOp functionOp = builder.create<mlir::func::FuncOp>(builder.getStringAttr(function.name), functionType, attrs, argAttrs);
+    builder.setInsertionPointToStart(functionOp.addEntryBlock());
+
+    CodeGen_CIRCT::Visitor visitor(builder, inputNames);
+    function.body.accept(&visitor);
+
+    builder.create<mlir::func::ReturnOp>();
+
+    generateKernelXml(function);
 
     // Print MLIR before running passes
     std::cout << "Original MLIR" << std::endl;
@@ -196,16 +193,16 @@ void CodeGen_CIRCT::compile(const Module &module) {
     std::cout << "[Calyx to FSM] MLIR:" << std::endl;
     mlir_module.dump();
     internal_assert(pmCalyxToFSMRunResult.succeeded());
-#if 0
+
     // Create Calyx external memory to AXI interface
     builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
     createCalyxExtMemToAXI(builder);
     std::cout << "[Adding CalyxExtMemToAXI] MLIR:" << std::endl;
     mlir_module.dump();
-#endif
+
     // Add AXI control
     builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
-    createControlAxi(builder);
+    createControlAxi(builder, flattenedKernelArgs);
     std::cout << "[Adding Control AXI] MLIR:" << std::endl;
     mlir_module.dump();
 
@@ -234,17 +231,23 @@ void CodeGen_CIRCT::compile(const Module &module) {
     std::cout << "Done!" << std::endl;
 }
 
-void CodeGen_CIRCT::fillCIRCTBufferDescriptor(const std::string &name, int dimensions, CIRCTBufferDescriptor &desc) {
-    // A pointer to the start of the data in main memory (offset of the buffer into the AXI4 master interface)
-    desc.push_back({name + "_host", 64});
-    // The dimensionality of the buffer
-    desc.push_back({name + "_dimensions", 32});
+void CodeGen_CIRCT::flattenKernelArguments(const std::vector<LoweredArgument> &inArgs, FlattenedKernelArgs &args) {
+    for (const auto &arg : inArgs) {
+        if (arg.is_scalar() && arg.type.is_int_or_uint()) {
+            args.push_back({arg.name, arg.type.bits()});
+        } else if (arg.is_buffer()) {
+            // A pointer to the start of the data in main memory (offset of the buffer into the AXI4 master interface)
+            args.push_back({arg.name + "_host", 64});
+            // The dimensionality of the buffer
+            args.push_back({arg.name + "_dimensions", 32});
 
-    // Buffer dimensions
-    for (int i = 0; i < dimensions; i++) {
-        desc.push_back({name + "_dim_" + std::to_string(i) + "_min", 32});
-        desc.push_back({name + "_dim_" + std::to_string(i) + "_extent", 32});
-        desc.push_back({name + "_dim_" + std::to_string(i) + "_stride", 32});
+            // Buffer dimensions
+            for (int i = 0; i < arg.dimensions; i++) {
+                args.push_back({arg.name + "_dim_" + std::to_string(i) + "_min", 32});
+                args.push_back({arg.name + "_dim_" + std::to_string(i) + "_extent", 32});
+                args.push_back({arg.name + "_dim_" + std::to_string(i) + "_stride", 32});
+            }
+        }
     }
 }
 
@@ -507,7 +510,7 @@ void CodeGen_CIRCT::createCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder) 
     }
 }
 
-void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder) {
+void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder, const FlattenedKernelArgs &kernelArgs) {
     // See https://docs.xilinx.com/r/en-US/ug1393-vitis-application-acceleration/Control-Requirements-for-XRT-Managed-Kernels
     static constexpr int AXI_ADDR_WIDTH = 32;
     static constexpr int AXI_DATA_WIDTH = 32;
@@ -550,17 +553,28 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder) {
         {"bresp", builder.getI2Type(), circt::hw::PortDirection::OUTPUT},
     };
 
+    // Module inputs and outputs
     mlir::SmallVector<circt::hw::PortInfo> ports;
+
     // Clock and reset signals
     ports.push_back(circt::hw::PortInfo{builder.getStringAttr("clock"), circt::hw::PortDirection::INPUT, builder.getI1Type()});
     ports.push_back(circt::hw::PortInfo{builder.getStringAttr("reset"), circt::hw::PortDirection::INPUT, builder.getI1Type()});
+
     // ap_start and ap_done
     ports.push_back(circt::hw::PortInfo{builder.getStringAttr("ap_start"), circt::hw::PortDirection::OUTPUT, builder.getI1Type()});
     ports.push_back(circt::hw::PortInfo{builder.getStringAttr("ap_done"), circt::hw::PortDirection::INPUT, builder.getI1Type()});
+
     // AXI signals
     for (const auto &signal : axiSignals) {
         ports.push_back(circt::hw::PortInfo{builder.getStringAttr(toFullAxiSignalName(signal.name)),
                                             signal.direction, signal.type});
+    }
+
+    // Kernel arguments
+    for (const auto &arg : kernelArgs) {
+        ports.push_back(circt::hw::PortInfo{builder.getStringAttr(arg.name),
+                                            circt::hw::PortDirection::OUTPUT,
+                                            builder.getIntegerType(arg.size)});
     }
 
     // Create ControllerAXI HW module
@@ -912,11 +926,18 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder) {
                                                               "rdata_reg");
     hwModuleOutputValues[moduleGetAxiOutputIndex("rdata")] = rdata;
 
-    mlir::SmallVector<uint32_t> caseValues;
-    caseValues.push_back(0);
-    caseValues.push_back(0x4);
-    caseValues.push_back(0x8);
-    caseValues.push_back(0xC);
+    // Create registers storing kernel arguments (scalars and buffer pointers)
+    for (const auto &arg : kernelArgs) {
+        mlir::Type type = builder.getIntegerType(arg.size);
+        mlir::Value zero = builder.create<circt::hw::ConstantOp>(type, 0);
+        mlir::Value argRegNext = builder.create<circt::sv::LogicOp>(type, arg.name + "_next");
+        mlir::Value argRegNextRead = builder.create<circt::sv::ReadInOutOp>(argRegNext);
+        mlir::Value argReg = builder.create<circt::seq::CompRegOp>(argRegNextRead, clock, reset, zero, arg.name + "_reg");
+        hwModuleOutputValues[moduleGetOutputIndex(arg.name)] = argReg;
+    }
+
+    // 4 registers + num kernel arguments (each is 8B)
+    const size_t numCases = 4 + kernelArgs.size() * 2;
 
     builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
         builder.create<circt::sv::IfOp>(
@@ -924,20 +945,19 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder) {
             /*thenCtor*/ [&]() {
                 mlir::Value index = builder.create<circt::comb::ExtractOp>(moduleGetAxiInputValue("araddr"), 0, 12);
                 builder.create<circt::sv::CaseOp>(
-                    CaseStmtType::CaseStmt, index, caseValues.size() + 1,
+                    CaseStmtType::CaseStmt, index, numCases + 1,
                     [&](size_t caseIdx) -> std::unique_ptr<circt::sv::CasePattern> {
-                        bool isDefault = caseIdx == caseValues.size();
+                        bool isDefault = caseIdx == numCases;
                         std::unique_ptr<circt::sv::CasePattern> pattern;
                         mlir::Value value;
-
-                        std::cout << "caseIdx: " << caseIdx << std::endl;
 
                         if (isDefault) {
                             pattern = std::make_unique<circt::sv::CaseDefaultPattern>(builder.getContext());
                         } else {
-                            pattern = std::make_unique<circt::sv::CaseBitPattern>(mlir::APInt(/*numBits=*/12, caseValues[caseIdx]),
+                            const uint32_t offset = caseIdx << 2;
+                            pattern = std::make_unique<circt::sv::CaseBitPattern>(mlir::APInt(/*numBits=*/12, offset),
                                                                                   builder.getContext());
-                            switch (caseValues[caseIdx]) {
+                            switch (offset) {
                             case 0x00:
                                 value = builder.create<circt::comb::ConcatOp>(mlir::ValueRange{
                                     builder.create<circt::hw::ConstantOp>(builder.getIntegerType(29), 0),
@@ -957,6 +977,13 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder) {
                                 value = builder.create<circt::comb::ConcatOp>(mlir::ValueRange{
                                     builder.create<circt::hw::ConstantOp>(builder.getIntegerType(30), 0),
                                     int_isr_ready, int_isr_done});
+                                break;
+                            default:
+                                const KernelArg &arg = kernelArgs[(offset - 0x10) >> 3];
+                                if ((offset % 8) == 0 || arg.size > 32) {
+                                    value = builder.create<circt::comb::ExtractOp>(hwModuleOutputValues[moduleGetOutputIndex(arg.name)],
+                                                                                   (offset % 8) * 8, 32);
+                                }
                                 break;
                             }
                         }
@@ -1086,21 +1113,6 @@ CodeGen_CIRCT::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, const std::
         std::string name = inputNames[i];
         sym_push(name, funcOp.getArgument(i));
     }
-
-#if 0
-     /*   circt::hw::StructType dim_type = builder.getType<circt::hw::StructType>(mlir::SmallVector({
-            circt::hw::StructType::FieldInfo{builder.getStringAttr("min"), i32},
-            circt::hw::StructType::FieldInfo{builder.getStringAttr("extent"), i32},
-            circt::hw::StructType::FieldInfo{builder.getStringAttr("stride"), i32}
-        }));*/
-
-       // builder.create<circt::hw::StructCreateOp>(dim_type, {builder.create<mlir::arith::ConstantOp>(type, builder.getIntegerAttr(type, op->value));
-    mlir::Type i32 = builder.getI32Type();
-    mlir::Type i64 = builder.getI64Type();
-    mlir::TupleType type = builder.getTupleType({i32, i64, i32});
-
-    builder.create<mlir::arith::ConstantOp>(type, builder.getIntegerAttr(type, 43));
-#endif
 }
 
 mlir::Value CodeGen_CIRCT::Visitor::codegen(const Expr &e) {
