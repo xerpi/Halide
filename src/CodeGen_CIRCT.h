@@ -21,10 +21,18 @@ namespace Internal {
 
 class CodeGen_CIRCT {
 public:
+    struct CIRCTBufferDescriptorField {
+        std::string name;
+        int size;
+    };
+    using CIRCTBufferDescriptor = std::vector<CIRCTBufferDescriptorField>;
+
     CodeGen_CIRCT();
 
     void compile(const Module &module);
+    static void fillCIRCTBufferDescriptor(const std::string &name, int dimensions, CIRCTBufferDescriptor &desc);
     void createCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder);
+    void createControlAxi(mlir::ImplicitLocOpBuilder &builder);
     static void generateKernelXml(const Internal::LoweredFunc &function);
 
 protected:
