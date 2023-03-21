@@ -27,7 +27,7 @@
 #include <circt/Dialect/FSM/FSMDialect.h>
 #include <circt/Dialect/HW/HWDialect.h>
 #include <circt/Dialect/HW/HWPasses.h>
-#include <circt/Dialect/SV/SVDialect.h>
+#include <circt/Dialect/SV/SVAttributes.h>
 #include <circt/Dialect/SV/SVOps.h>
 #include <circt/Dialect/Seq/SeqDialect.h>
 #include <circt/Dialect/Seq/SeqOps.h>
@@ -554,6 +554,9 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder) {
     // Clock and reset signals
     ports.push_back(circt::hw::PortInfo{builder.getStringAttr("clock"), circt::hw::PortDirection::INPUT, builder.getI1Type()});
     ports.push_back(circt::hw::PortInfo{builder.getStringAttr("reset"), circt::hw::PortDirection::INPUT, builder.getI1Type()});
+    // ap_start and ap_done
+    ports.push_back(circt::hw::PortInfo{builder.getStringAttr("ap_start"), circt::hw::PortDirection::OUTPUT, builder.getI1Type()});
+    ports.push_back(circt::hw::PortInfo{builder.getStringAttr("ap_done"), circt::hw::PortDirection::INPUT, builder.getI1Type()});
     // AXI signals
     for (const auto &signal : axiSignals) {
         ports.push_back(circt::hw::PortInfo{builder.getStringAttr(toFullAxiSignalName(signal.name)),
@@ -580,15 +583,19 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder) {
         return moduleGetInputValue(toFullAxiSignalName(name));
     };
 
-    auto moduleGetAxiOutputIndex = [&](const std::string &name) {
+    auto moduleGetOutputIndex = [&](const std::string &name) {
         unsigned int i;
         const auto &names = hwModuleOp.getResultNames();
         for (i = 0; i < hwModuleOp.getNumResults(); i++) {
-            if (names[i].cast<mlir::StringAttr>().str() == toFullAxiSignalName(name))
+            if (names[i].cast<mlir::StringAttr>().str() == name)
                 break;
         }
         assert(i < hwModuleOp.getNumResults());
         return i;
+    };
+
+    auto moduleGetAxiOutputIndex = [&](const std::string &name) {
+        return moduleGetOutputIndex(toFullAxiSignalName(name));
     };
 
     mlir::Value clock = moduleGetInputValue("clock");
@@ -787,47 +794,179 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder) {
             /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(awaddr_next, awaddr_reg); });
     });
 
+    const mlir::Value isWriteValidReady = builder.create<circt::comb::AndOp>(moduleGetAxiInputValue("wvalid"),
+                                                                             hwModuleOutputValues[moduleGetAxiOutputIndex("wready")]);
+    const mlir::Value isAreadValidReady = builder.create<circt::comb::AndOp>(moduleGetAxiInputValue("arvalid"),
+                                                                             hwModuleOutputValues[moduleGetAxiOutputIndex("arready")]);
+    const mlir::Value isReadValidReady = builder.create<circt::comb::AndOp>(moduleGetAxiInputValue("rready"),
+                                                                            hwModuleOutputValues[moduleGetAxiOutputIndex("rvalid")]);
     // Control Register Signals (offset 0x00)
     mlir::Value int_ap_start_next = builder.create<circt::sv::LogicOp>(builder.getI1Type(), "int_ap_start_next");
     mlir::Value int_ap_start_next_read = builder.create<circt::sv::ReadInOutOp>(int_ap_start_next);
     mlir::Value int_ap_start = builder.create<circt::seq::CompRegOp>(int_ap_start_next_read, clock, reset, value0, "int_ap_start_reg");
+    hwModuleOutputValues[moduleGetOutputIndex("ap_start")] = int_ap_start;
+    mlir::Value isWaddr0x00 = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq, awaddr_reg,
+                                                                  builder.create<circt::hw::ConstantOp>(axiAddrWidthType, 0));
+
+    builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
+        builder.create<circt::sv::IfOp>(
+            builder.create<circt::comb::AndOp>(isWriteValidReady, isWaddr0x00),
+            /*thenCtor*/ [&]() {
+                mlir::Value apStartBit = builder.create<circt::comb::ExtractOp>(moduleGetAxiInputValue("wdata"), 0, 1);
+                builder.create<circt::sv::BPAssignOp>(int_ap_start_next, apStartBit); },
+            /*elseCtor*/ [&]() { builder.create<circt::sv::IfOp>(
+                                     moduleGetInputValue("ap_done"),
+                                     /*thenCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ap_start_next, value0); },
+                                     /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ap_start_next, int_ap_start); }); });
+    });
 
     mlir::Value int_ap_done_next = builder.create<circt::sv::LogicOp>(builder.getI1Type(), "int_ap_done_next");
     mlir::Value int_ap_done_next_read = builder.create<circt::sv::ReadInOutOp>(int_ap_done_next);
     mlir::Value int_ap_done = builder.create<circt::seq::CompRegOp>(int_ap_done_next_read, clock, reset, value0, "int_ap_done_reg");
+    mlir::Value isRaddr0x00 = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq,
+                                                                  moduleGetAxiInputValue("araddr"),
+                                                                  builder.create<circt::hw::ConstantOp>(axiAddrWidthType, 0));
+
+    builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
+        builder.create<circt::sv::IfOp>(
+            builder.create<circt::comb::AndOp>(isReadValidReady, isRaddr0x00),
+            /*thenCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ap_done_next, value0); },
+            /*elseCtor*/ [&]() { builder.create<circt::sv::IfOp>(
+                                     moduleGetInputValue("ap_done"),
+                                     /*thenCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ap_start_next, value1); },
+                                     /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ap_start_next, int_ap_done); }); });
+    });
 
     mlir::Value int_ap_idle_next = builder.create<circt::sv::LogicOp>(builder.getI1Type(), "int_ap_idle_next");
     mlir::Value int_ap_idle_next_read = builder.create<circt::sv::ReadInOutOp>(int_ap_idle_next);
     mlir::Value int_ap_idle = builder.create<circt::seq::CompRegOp>(int_ap_idle_next_read, clock, reset, value1, "int_ap_idle_reg");
 
-    mlir::Value isWaddr0x00 = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq,
-                                                                  awaddr_reg,
-                                                                  builder.create<circt::hw::ConstantOp>(axiAddrWidthType, 0));
-    mlir::Value writeToControlReg = builder.create<circt::comb::AndOp>(moduleGetAxiInputValue("wvalid"),
-                                                                       hwModuleOutputValues[moduleGetAxiOutputIndex("wready")]);
-    writeToControlReg = builder.create<circt::comb::AndOp>(writeToControlReg, isWaddr0x00);
+    builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
+        builder.create<circt::sv::IfOp>(
+            moduleGetInputValue("ap_done"),
+            /*thenCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ap_idle_next, value1); },
+            /*elseCtor*/ [&]() { builder.create<circt::sv::IfOp>(
+                                     hwModuleOutputValues[moduleGetOutputIndex("ap_start")],
+                                     /*thenCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ap_idle_next, value0); },
+                                     /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ap_idle_next, int_ap_idle); }); });
+    });
+
+    mlir::Value int_gie_next = builder.create<circt::sv::LogicOp>(builder.getI1Type(), "int_gie_next");
+    mlir::Value int_gie_read = builder.create<circt::sv::ReadInOutOp>(int_gie_next);
+    mlir::Value int_gie = builder.create<circt::seq::CompRegOp>(int_gie_read, clock, reset, value0, "int_gie_reg");
+    mlir::Value isWaddr0x04 = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq, awaddr_reg,
+                                                                  builder.create<circt::hw::ConstantOp>(axiAddrWidthType, 0x04));
 
     builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
         builder.create<circt::sv::IfOp>(
-            writeToControlReg,
+            builder.create<circt::comb::AndOp>(isWriteValidReady, isWaddr0x04),
             /*thenCtor*/ [&]() {
-                mlir::Value apStartBit = builder.create<circt::comb::ExtractOp>(moduleGetAxiInputValue("wdata"), 0, 1);
-                builder.create<circt::sv::BPAssignOp>(int_ap_start_next, apStartBit); },
-            /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ap_start_next, value0); });
+                mlir::Value gieBit = builder.create<circt::comb::ExtractOp>(moduleGetAxiInputValue("wdata"), 0, 1);
+                builder.create<circt::sv::BPAssignOp>(int_gie_next, gieBit); },
+            /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_gie_next, int_gie); });
     });
 
-    int idx = 0;
-    for (auto &output : hwModuleOutputValues) {
-        if (!output) {
-            mlir::Type type = hwModuleOp.getResultTypes()[idx];
-            const auto name = hwModuleOp.getResultNames()[idx].cast<mlir::StringAttr>().str();
-            mlir::Value wire = builder.create<circt::sv::WireOp>(type, name + "_wire");
-            output = builder.create<circt::sv::ReadInOutOp>(wire);
-            mlir::Value cnst = builder.create<circt::hw::ConstantOp>(builder.getIntegerAttr(type, 0));
-            builder.create<circt::sv::AssignOp>(wire, cnst);
-        }
-        idx++;
-    }
+    mlir::Value int_ier_next = builder.create<circt::sv::LogicOp>(builder.getI2Type(), "int_ier_next");
+    mlir::Value int_ier_read = builder.create<circt::sv::ReadInOutOp>(int_ier_next);
+    mlir::Value int_ier = builder.create<circt::seq::CompRegOp>(int_ier_read, clock, reset,
+                                                                builder.create<circt::hw::ConstantOp>(builder.getI2Type(), 0),
+                                                                "int_ier_reg");
+    mlir::Value isWaddr0x08 = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq, awaddr_reg,
+                                                                  builder.create<circt::hw::ConstantOp>(axiAddrWidthType, 0x08));
+
+    builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
+        builder.create<circt::sv::IfOp>(
+            builder.create<circt::comb::AndOp>(isWriteValidReady, isWaddr0x08),
+            /*thenCtor*/ [&]() {
+                mlir::Value ierBits = builder.create<circt::comb::ExtractOp>(moduleGetAxiInputValue("wdata"), 0, 2);
+                builder.create<circt::sv::BPAssignOp>(int_ier_next, ierBits); },
+            /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ier_next, int_ier); });
+    });
+
+    mlir::Value int_isr_done_next = builder.create<circt::sv::LogicOp>(builder.getI1Type(), "int_isr_done_next");
+    mlir::Value int_isr_done_read = builder.create<circt::sv::ReadInOutOp>(int_isr_done_next);
+    mlir::Value int_isr_done = builder.create<circt::seq::CompRegOp>(int_isr_done_read, clock, reset, value0, "int_isr_done_reg");
+    mlir::Value int_isr_ready_next = builder.create<circt::sv::LogicOp>(builder.getI1Type(), "int_isr_ready_next");
+    mlir::Value int_isr_ready_read = builder.create<circt::sv::ReadInOutOp>(int_isr_ready_next);
+    mlir::Value int_isr_ready = builder.create<circt::seq::CompRegOp>(int_isr_ready_read, clock, reset, value0, "int_isr_ready_reg");
+    mlir::Value isWaddr0x0C = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq, awaddr_reg,
+                                                                  builder.create<circt::hw::ConstantOp>(axiAddrWidthType, 0x0C));
+
+    builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
+        builder.create<circt::sv::IfOp>(
+            builder.create<circt::comb::AndOp>(isWriteValidReady, isWaddr0x0C),
+            /*thenCtor*/ [&]() {
+                mlir::Value isrDoneBit = builder.create<circt::comb::ExtractOp>(moduleGetAxiInputValue("wdata"), 0, 1);
+                mlir::Value isrReadyBit = builder.create<circt::comb::ExtractOp>(moduleGetAxiInputValue("wdata"), 1, 1);
+                builder.create<circt::sv::BPAssignOp>(int_isr_done_next, isrDoneBit);
+                builder.create<circt::sv::BPAssignOp>(int_isr_ready_next, isrReadyBit); },
+            /*elseCtor*/ [&]() {
+                builder.create<circt::sv::BPAssignOp>(int_isr_done_next, int_isr_done);
+                builder.create<circt::sv::BPAssignOp>(int_isr_ready_next, int_isr_ready); });
+    });
+
+    mlir::Value rdata_next = builder.create<circt::sv::LogicOp>(axiDataWidthType, "rdata_next");
+    mlir::Value rdata_next_read = builder.create<circt::sv::ReadInOutOp>(rdata_next);
+    mlir::Value rdata = builder.create<circt::seq::CompRegOp>(rdata_next_read, clock, reset,
+                                                              builder.create<circt::hw::ConstantOp>(axiDataWidthType, 0),
+                                                              "rdata_reg");
+    hwModuleOutputValues[moduleGetAxiOutputIndex("rdata")] = rdata;
+
+    mlir::SmallVector<uint32_t> caseValues;
+    caseValues.push_back(0);
+    caseValues.push_back(0x4);
+    caseValues.push_back(0x8);
+    caseValues.push_back(0xC);
+
+    builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
+        builder.create<circt::sv::IfOp>(
+            isAreadValidReady,
+            /*thenCtor*/ [&]() {
+                mlir::Value index = builder.create<circt::comb::ExtractOp>(moduleGetAxiInputValue("araddr"), 0, 12);
+                builder.create<circt::sv::CaseOp>(
+                    CaseStmtType::CaseStmt, index, caseValues.size() + 1,
+                    [&](size_t caseIdx) -> std::unique_ptr<circt::sv::CasePattern> {
+                        bool isDefault = caseIdx == caseValues.size();
+                        std::unique_ptr<circt::sv::CasePattern> pattern;
+                        mlir::Value value;
+
+                        std::cout << "caseIdx: " << caseIdx << std::endl;
+
+                        if (isDefault) {
+                            pattern = std::make_unique<circt::sv::CaseDefaultPattern>(builder.getContext());
+                        } else {
+                            pattern = std::make_unique<circt::sv::CaseBitPattern>(mlir::APInt(/*numBits=*/12, caseValues[caseIdx]),
+                                                                                  builder.getContext());
+                            switch (caseValues[caseIdx]) {
+                            case 0x00:
+                                value = builder.create<circt::comb::ConcatOp>(mlir::ValueRange{
+                                    builder.create<circt::hw::ConstantOp>(builder.getIntegerType(29), 0),
+                                    int_ap_idle, int_ap_done, int_ap_start});
+                                break;
+                            case 0x04:
+                                value = builder.create<circt::comb::ConcatOp>(mlir::ValueRange{
+                                    builder.create<circt::hw::ConstantOp>(builder.getIntegerType(31), 0),
+                                    int_gie});
+                                break;
+                            case 0x08:
+                                value = builder.create<circt::comb::ConcatOp>(mlir::ValueRange{
+                                    builder.create<circt::hw::ConstantOp>(builder.getIntegerType(30), 0),
+                                    int_ier});
+                                break;
+                            case 0x0C:
+                                value = builder.create<circt::comb::ConcatOp>(mlir::ValueRange{
+                                    builder.create<circt::hw::ConstantOp>(builder.getIntegerType(30), 0),
+                                    int_isr_ready, int_isr_done});
+                                break;
+                            }
+                        }
+                        if (!value)
+                            value = builder.create<circt::hw::ConstantOp>(axiDataWidthType, 0);
+                        builder.create<circt::sv::BPAssignOp>(rdata_next, value);
+                        return pattern;
+                    }); },
+            /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(rdata_next, rdata); });
+    });
 
     // Set module output operands
     auto outputOp = hwModuleOp.getBodyBlock()->getTerminator();
