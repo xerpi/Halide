@@ -84,12 +84,18 @@ void CodeGen_CIRCT::compile(const Module &module) {
         mlir::SmallVector<mlir::NamedAttribute> attrs;
         mlir::SmallVector<mlir::DictionaryAttr> argAttrs;
 
-        for (const auto &arg: function.args) {
+        for (const auto &arg : function.args) {
             static const char *const kind_names[] = {
-                "InputScalar", "InputBuffer", "OutputBuffer",
+                "InputScalar",
+                "InputBuffer",
+                "OutputBuffer",
             };
             static const char *const type_code_names[] = {
-                "int", "uint", "float", "handle", "bfloat",
+                "int",
+                "uint",
+                "float",
+                "handle",
+                "bfloat",
             };
 
             debug(1) << "\t\tArg: " << arg.name << "\n";
@@ -122,18 +128,20 @@ void CodeGen_CIRCT::compile(const Module &module) {
                     entries.push_back({"dim_" + std::to_string(i) + "_stride", i32});
                 }
 
-                for (const auto &entry: entries) {
+                for (const auto &entry : entries) {
                     inputs.push_back(entry.type);
                     const std::string name = arg.name + "_" + entry.suffix;
                     inputNames.push_back(name);
-                    argAttrs.push_back(builder.getDictionaryAttr(builder.getNamedAttr(circt::scfToCalyx::sPortNameAttr, builder.getStringAttr(name))));
+                    argAttrs.push_back(builder.getDictionaryAttr(
+                        builder.getNamedAttr(circt::scfToCalyx::sPortNameAttr, builder.getStringAttr(name))));
                 }
 
                 // Treat buffers as 1D
                 inputs.push_back(mlir::MemRefType::get({0}, builder.getIntegerType(arg.type.bits())));
                 const std::string name = arg.name + ".buffer";
                 inputNames.push_back(name);
-                argAttrs.push_back(builder.getDictionaryAttr(builder.getNamedAttr(circt::scfToCalyx::sPortNameAttr, builder.getStringAttr(name))));
+                argAttrs.push_back(builder.getDictionaryAttr(
+                    builder.getNamedAttr(circt::scfToCalyx::sSequentialReads, builder.getBoolAttr(true))));
             }
         }
 
@@ -217,7 +225,7 @@ void CodeGen_CIRCT::compile(const Module &module) {
     // Emit Verilog
     if (pmToCalyxRunResult.succeeded()) {
         std::cout << "Exporting Verilog." << std::endl;
-        auto exportVerilogResult = circt::exportSplitVerilog(mlir_module, module.name() + "_generated");
+        auto exportVerilogResult = circt::exportSplitVerilog(mlir_module, "generated_" + module.name());
         std::cout << "Export Verilog result: " << exportVerilogResult.succeeded() << std::endl;
     }
 
@@ -297,23 +305,23 @@ void CodeGen_CIRCT::generateKernelXml(const Internal::LoweredFunc &function) {
 
     uint64_t bufCnt = 0;
     uint64_t argIdx = 0;
-    uint64_t argOffset = 0x10; // XRT-Managed Kernels Control Requirements
-    for (const auto &arg: function.args) {
+    uint64_t argOffset = 0x10;  // XRT-Managed Kernels Control Requirements
+    for (const auto &arg : function.args) {
         if (arg.is_scalar() && arg.type.is_int_or_uint()) {
             pArgs->InsertEndChild(genArg(arg.name, 0, argIdx++, "s_axi_control", arg.type.bytes(),
-                                  argOffset += 8, genTypeStr(arg.type), 0, arg.type.bytes()));
+                                         argOffset += 8, genTypeStr(arg.type), 0, arg.type.bytes()));
         } else if (arg.is_buffer()) {
             pPorts->InsertEndChild(genPort(genAxiPortName(bufCnt), "master", std::numeric_limits<uint64_t>::max(), 512));
             pArgs->InsertEndChild(genArg(arg.name + "_host", 1, argIdx++, genAxiPortName(bufCnt), 8,
-                                  argOffset += 8, genTypeStr(arg.type) + "*", 0, 8));
+                                         argOffset += 8, genTypeStr(arg.type) + "*", 0, 8));
             pArgs->InsertEndChild(genArg(arg.name + "_dimensions", 0, argIdx++, "s_axi_control", 4, argOffset += 8, "int", 0, 4));
             for (int i = 0; i < arg.dimensions; i++) {
                 pArgs->InsertEndChild(genArg(arg.name + "_dim_" + std::to_string(i) + "_min", 0,
-                                      argIdx++, "s_axi_control", 4, argOffset += 8, "int", 0, 4));
+                                             argIdx++, "s_axi_control", 4, argOffset += 8, "int", 0, 4));
                 pArgs->InsertEndChild(genArg(arg.name + "_dim_" + std::to_string(i) + "_extent", 0,
-                                      argIdx++, "s_axi_control", 4, argOffset += 8, "int", 0, 4));
+                                             argIdx++, "s_axi_control", 4, argOffset += 8, "int", 0, 4));
                 pArgs->InsertEndChild(genArg(arg.name + "_dim_" + std::to_string(i) + "_stride", 0,
-                                      argIdx++, "s_axi_control", 4, argOffset += 8, "int", 0, 4));
+                                             argIdx++, "s_axi_control", 4, argOffset += 8, "int", 0, 4));
             }
             bufCnt++;
         }
@@ -359,7 +367,8 @@ mlir::Value CodeGen_CIRCT::Visitor::codegen(const Expr &e) {
     debug(4) << "Codegen (E): " << e.type() << ", " << e << "\n";
     value = mlir::Value();
     e.accept(this);
-    internal_assert(value) << "Codegen of an expr did not produce a MLIR value\n" << e;
+    internal_assert(value) << "Codegen of an expr did not produce a MLIR value\n"
+                           << e;
     return value;
 }
 
@@ -465,7 +474,7 @@ void CodeGen_CIRCT::Visitor::visit(const Mod *op) {
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Min *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";{}
+    debug(1) << __PRETTY_FUNCTION__ << "\n";
 
     std::string a_name = unique_name('a');
     std::string b_name = unique_name('b');
@@ -531,7 +540,7 @@ void CodeGen_CIRCT::Visitor::visit(const GE *op) {
 void CodeGen_CIRCT::Visitor::visit(const And *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
 
-    //value = builder.create<mlir::arith::CmpIOp>(predicate, codegen(op->a), codegen(op->b));
+    // value = builder.create<mlir::arith::CmpIOp>(predicate, codegen(op->a), codegen(op->b));
 }
 
 void CodeGen_CIRCT::Visitor::visit(const Or *op) {
@@ -552,9 +561,9 @@ void CodeGen_CIRCT::Visitor::visit(const Select *op) {
     mlir::Value trueValue = codegen(op->true_value);
     mlir::Value falseValue = codegen(op->false_value);
 
-   // mlir::Block *trueBlock = builder.createBlock();
+    // mlir::Block *trueBlock = builder.createBlock();
 
-   // builder.getLoc()
+    // builder.getLoc()
 #if 0
     value = builder.create<mlir::cf::CondBranchOp>(
         codegen(op->condition),
@@ -616,7 +625,7 @@ void CodeGen_CIRCT::Visitor::visit(const Call *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
     debug(1) << "\tName: " << op->name << "\n";
     debug(1) << "\tCall type: " << op->call_type << "\n";
-    for (const Expr &e: op->args)
+    for (const Expr &e : op->args)
         debug(1) << "\tArg: " << e << "\n";
 
     mlir::Type op_type = builder.getIntegerType(op->type.bits());
@@ -625,17 +634,17 @@ void CodeGen_CIRCT::Visitor::visit(const Call *op) {
         auto name = op->args[0].as<Variable>()->name;
         name = name.substr(0, name.find(".buffer"));
         value = sym_get(name + "_host");
-    } else if(op->name == Call::buffer_get_min) {
+    } else if (op->name == Call::buffer_get_min) {
         auto name = op->args[0].as<Variable>()->name;
         name = name.substr(0, name.find(".buffer"));
         int32_t d = op->args[1].as<IntImm>()->value;
         value = sym_get(name + "_dim_" + std::to_string(d) + "_min");
-    } else if(op->name == Call::buffer_get_extent) {
+    } else if (op->name == Call::buffer_get_extent) {
         auto name = op->args[0].as<Variable>()->name;
         name = name.substr(0, name.find(".buffer"));
         int32_t d = op->args[1].as<IntImm>()->value;
         value = sym_get(name + "_dim_" + std::to_string(d) + "_extent");
-    } else if(op->name == Call::buffer_get_stride) {
+    } else if (op->name == Call::buffer_get_stride) {
         auto name = op->args[0].as<Variable>()->name;
         name = name.substr(0, name.find(".buffer"));
         int32_t d = op->args[1].as<IntImm>()->value;
@@ -656,7 +665,8 @@ void CodeGen_CIRCT::Visitor::visit(const Let *op) {
 
 void CodeGen_CIRCT::Visitor::visit(const LetStmt *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
-    debug(1) << "Contents:" << "\n";
+    debug(1) << "Contents:"
+             << "\n";
     debug(1) << "\tName: " << op->name << "\n";
     sym_push(op->name, codegen(op->value));
     codegen(op->body);
@@ -680,8 +690,14 @@ void CodeGen_CIRCT::Visitor::visit(const For *op) {
     debug(1) << "\tMin: " << op->min << "\n";
     debug(1) << "\tExtent: " << op->extent << "\n";
     static const char *for_types[] = {
-        "Serial", "Parallel", "Vectorized", "Unrolled",
-        "Extern", "GPUBlock", "GPUThread", "GPULane",
+        "Serial",
+        "Parallel",
+        "Vectorized",
+        "Unrolled",
+        "Extern",
+        "GPUBlock",
+        "GPUThread",
+        "GPULane",
     };
     debug(1) << "\tForType: " << for_types[unsigned(op->for_type)] << "\n";
 
@@ -733,7 +749,7 @@ void CodeGen_CIRCT::Visitor::visit(const Allocate *op) {
     debug(1) << "  memory_type: " << int(op->memory_type) << "\n";
     debug(1) << "  size: " << size << "\n";
 
-    for (auto &ext: op->extents) {
+    for (auto &ext : op->extents) {
         debug(1) << "  ext: " << ext << "\n";
     }
 
@@ -760,7 +776,7 @@ void CodeGen_CIRCT::Visitor::visit(const Block *op) {
             asserts.push_back(a);
             s = op->rest;
         }
-        //codegen_asserts(asserts);
+        // codegen_asserts(asserts);
         codegen(s);
     } else {
         codegen(op->first);
@@ -770,7 +786,8 @@ void CodeGen_CIRCT::Visitor::visit(const Block *op) {
 
 void CodeGen_CIRCT::Visitor::visit(const IfThenElse *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
-    debug(1) << "Contents:" << "\n";
+    debug(1) << "Contents:"
+             << "\n";
     debug(1) << "\tcondition: " << op->condition << "\n";
     debug(1) << "\tthen_case: " << op->then_case << "\n";
     debug(1) << "\telse_case: " << op->else_case << "\n";
@@ -780,9 +797,8 @@ void CodeGen_CIRCT::Visitor::visit(const IfThenElse *op) {
 
     if (op->else_case.defined()) {
         codegen(op->else_case);
-        //halide_buffer_t
+        // halide_buffer_t
     } else {
-
     }
 }
 
@@ -819,7 +835,7 @@ void CodeGen_CIRCT::Visitor::visit(const Atomic *op) {
 }
 
 void CodeGen_CIRCT::Visitor::sym_push(const std::string &name, mlir::Value value) {
-    //value.getDefiningOp()->setAttr("sv.namehint", builder.getStringAttr(name));
+    // value.getDefiningOp()->setAttr("sv.namehint", builder.getStringAttr(name));
     symbol_table.push(name, value);
 }
 
