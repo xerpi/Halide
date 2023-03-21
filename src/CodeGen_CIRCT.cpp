@@ -30,6 +30,7 @@
 #include <circt/Dialect/SV/SVDialect.h>
 #include <circt/Dialect/SV/SVOps.h>
 #include <circt/Dialect/Seq/SeqDialect.h>
+#include <circt/Dialect/Seq/SeqOps.h>
 #include <circt/Dialect/Seq/SeqPasses.h>
 #include <circt/Support/LoweringOptions.h>
 
@@ -507,7 +508,8 @@ void CodeGen_CIRCT::createCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder) 
 }
 
 void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder) {
-    static constexpr int AXI_ADDR_WIDTH = 64;
+    // See https://docs.xilinx.com/r/en-US/ug1393-vitis-application-acceleration/Control-Requirements-for-XRT-Managed-Kernels
+    static constexpr int AXI_ADDR_WIDTH = 32;
     static constexpr int AXI_DATA_WIDTH = 32;
     mlir::Type axiAddrWidthType = builder.getIntegerType(AXI_ADDR_WIDTH);
     mlir::Type axiDataWidthType = builder.getIntegerType(AXI_DATA_WIDTH);
@@ -522,32 +524,30 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder) {
     };
 
     const mlir::SmallVector<AxiSignalInfo> axiSignals = {
-        // AXI4 slave interface (read)
+        // AXI4-lite slave interface (read)
         // Read address channel
         {"arvalid", builder.getI1Type(), circt::hw::PortDirection::INPUT},
         {"arready", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
         {"araddr", axiAddrWidthType, circt::hw::PortDirection::INPUT},
-        {"arlen", builder.getI8Type(), circt::hw::PortDirection::INPUT},
         // Read data channel
         {"rvalid", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
         {"rready", builder.getI1Type(), circt::hw::PortDirection::INPUT},
         {"rdata", axiDataWidthType, circt::hw::PortDirection::OUTPUT},
-        {"rlast", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
-        // AXI4 slave interface (write)
+        {"rresp", builder.getI2Type(), circt::hw::PortDirection::OUTPUT},
+        // AXI4-lite slave interface (write)
         // Write address channel
         {"awvalid", builder.getI1Type(), circt::hw::PortDirection::INPUT},
         {"awready", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
         {"awaddr", axiAddrWidthType, circt::hw::PortDirection::INPUT},
-        {"awlen", builder.getI8Type(), circt::hw::PortDirection::INPUT},
         // Write data channel
         {"wvalid", builder.getI1Type(), circt::hw::PortDirection::INPUT},
         {"wready", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
         {"wdata", axiDataWidthType, circt::hw::PortDirection::INPUT},
         {"wstrb", builder.getIntegerType(AXI_DATA_WIDTH / 8), circt::hw::PortDirection::INPUT},
-        {"wlast", builder.getI1Type(), circt::hw::PortDirection::INPUT},
         // Write response channel
         {"bvalid", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
         {"bready", builder.getI1Type(), circt::hw::PortDirection::INPUT},
+        {"bresp", builder.getI2Type(), circt::hw::PortDirection::OUTPUT},
     };
 
     mlir::SmallVector<circt::hw::PortInfo> ports;
@@ -567,9 +567,6 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder) {
     mlir::SmallVector<mlir::Value> hwModuleOutputValues(hwModuleOp.getNumResults());
 
     // Helpers
-    mlir::Value value0 = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(false));
-    mlir::Value value1 = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(true));
-
     auto moduleGetInputValue = [&](const std::string &name) {
         const auto &names = hwModuleOp.getArgNames();
         for (unsigned int i = 0; i < hwModuleOp.getNumArguments(); i++) {
@@ -593,6 +590,9 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder) {
         assert(i < hwModuleOp.getNumResults());
         return i;
     };
+
+    mlir::Value clock = moduleGetInputValue("clock");
+    mlir::Value reset = moduleGetInputValue("reset");
 
     // ReadState FSM
     mlir::SmallVector<std::pair<std::string, mlir::Value>> readStateFsmInputs{
@@ -625,10 +625,12 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder) {
         readFsmMachineOp.setResNamesAttr(builder.getArrayAttr(fsmOutputNames));
         mlir::SmallVector<mlir::Value> fsmOutputValues(readFsmMachineOp.getNumResults());
 
-        auto &readFsmBody = readFsmMachineOp.getBody();
-        auto readFsmBuilder = mlir::ImplicitLocOpBuilder::atBlockEnd(readFsmBody.getLoc(), &readFsmBody.front());
+        auto &fsmBody = readFsmMachineOp.getBody();
+        auto fsmBuilder = mlir::ImplicitLocOpBuilder::atBlockEnd(fsmBody.getLoc(), &fsmBody.front());
+        mlir::Value value0 = fsmBuilder.create<circt::hw::ConstantOp>(builder.getBoolAttr(false));
+        mlir::Value value1 = fsmBuilder.create<circt::hw::ConstantOp>(builder.getBoolAttr(true));
         {
-            auto state = readFsmBuilder.create<circt::fsm::StateOp>("IDLE");
+            auto state = fsmBuilder.create<circt::fsm::StateOp>("IDLE");
             {
                 fsmOutputValues[0] = value1;
                 fsmOutputValues[1] = value0;
@@ -637,13 +639,13 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder) {
             auto &transitions = state.getTransitions();
             auto transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
             {
-                auto transition = transitionsBuilder.create<circt::fsm::TransitionOp>("READ");
+                auto transition = transitionsBuilder.create<circt::fsm::TransitionOp>("DATA");
                 transition.ensureGuard(transitionsBuilder);
                 transition.getGuardReturn().setOperand(readFsmMachineOp.getArgument(0));
             }
         }
         {
-            auto state = readFsmBuilder.create<circt::fsm::StateOp>("READ");
+            auto state = fsmBuilder.create<circt::fsm::StateOp>("DATA");
             {
                 fsmOutputValues[0] = value0;
                 fsmOutputValues[1] = value1;
@@ -659,16 +661,160 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder) {
         }
     }
 
-    // Module
+    // WriteState FSM
+    mlir::SmallVector<std::pair<std::string, mlir::Value>> writeStateFsmInputs{
+        {"awvalid", moduleGetAxiInputValue("awvalid")},
+        {"wvalid", moduleGetAxiInputValue("wvalid")},
+        {"bready", moduleGetAxiInputValue("bready")}};
+    mlir::SmallVector<std::pair<std::string, unsigned int>> writeStateFsmOutputs{
+        {"awready", moduleGetAxiOutputIndex("awready")},
+        {"wready", moduleGetAxiOutputIndex("wready")},
+        {"bvalid", moduleGetAxiOutputIndex("bvalid")}};
+    mlir::SmallVector<mlir::Value> writeStateFsmInputValues;
+    mlir::SmallVector<mlir::Type> writeStateFsmOutputTypes;
+    circt::fsm::MachineOp writeFsmMachineOp;
+    {
+        mlir::SmallVector<mlir::Type> fsmInputTypes;
+        mlir::SmallVector<mlir::Attribute> fsmInputNames, fsmOutputNames;
+
+        for (const auto &input : writeStateFsmInputs) {
+            fsmInputTypes.push_back(input.second.getType());
+            writeStateFsmInputValues.push_back(input.second);
+            fsmInputNames.push_back(builder.getStringAttr(toFullAxiSignalName(input.first)));
+        }
+
+        for (const auto &output : writeStateFsmOutputs) {
+            writeStateFsmOutputTypes.push_back(hwModuleOp.getResultTypes()[output.second]);
+            fsmOutputNames.push_back(builder.getStringAttr(toFullAxiSignalName(output.first)));
+        }
+
+        mlir::FunctionType fsmFunctionType = builder.getFunctionType(fsmInputTypes, writeStateFsmOutputTypes);
+        writeFsmMachineOp = builder.create<circt::fsm::MachineOp>("ControlAXI_WriteFSM", "IDLE", fsmFunctionType);
+        writeFsmMachineOp.setArgNamesAttr(builder.getArrayAttr(fsmInputNames));
+        writeFsmMachineOp.setResNamesAttr(builder.getArrayAttr(fsmOutputNames));
+        mlir::SmallVector<mlir::Value> fsmOutputValues(writeFsmMachineOp.getNumResults());
+
+        auto &fsmBody = writeFsmMachineOp.getBody();
+        auto fsmBuilder = mlir::ImplicitLocOpBuilder::atBlockEnd(fsmBody.getLoc(), &fsmBody.front());
+        mlir::Value value0 = fsmBuilder.create<circt::hw::ConstantOp>(builder.getBoolAttr(false));
+        mlir::Value value1 = fsmBuilder.create<circt::hw::ConstantOp>(builder.getBoolAttr(true));
+        {
+            auto state = fsmBuilder.create<circt::fsm::StateOp>("IDLE");
+            {
+                fsmOutputValues[0] = value1;
+                fsmOutputValues[1] = value0;
+                fsmOutputValues[2] = value0;
+                state.getOutputOp()->setOperands(fsmOutputValues);
+            }
+            auto &transitions = state.getTransitions();
+            auto transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
+            {
+                auto transition = transitionsBuilder.create<circt::fsm::TransitionOp>("DATA");
+                transition.ensureGuard(transitionsBuilder);
+                transition.getGuardReturn().setOperand(writeFsmMachineOp.getArgument(0));
+            }
+        }
+        {
+            auto state = fsmBuilder.create<circt::fsm::StateOp>("DATA");
+            {
+                fsmOutputValues[0] = value0;
+                fsmOutputValues[1] = value1;
+                fsmOutputValues[2] = value0;
+                state.getOutputOp()->setOperands(fsmOutputValues);
+            }
+            auto &transitions = state.getTransitions();
+            auto transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
+            {
+                auto transition = transitionsBuilder.create<circt::fsm::TransitionOp>("RESP");
+                transition.ensureGuard(transitionsBuilder);
+                transition.getGuardReturn().setOperand(writeFsmMachineOp.getArgument(1));
+            }
+        }
+        {
+            auto state = fsmBuilder.create<circt::fsm::StateOp>("RESP");
+            {
+                fsmOutputValues[0] = value0;
+                fsmOutputValues[1] = value0;
+                fsmOutputValues[2] = value1;
+                state.getOutputOp()->setOperands(fsmOutputValues);
+            }
+            auto &transitions = state.getTransitions();
+            auto transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
+            {
+                auto transition = transitionsBuilder.create<circt::fsm::TransitionOp>("IDLE");
+                transition.ensureGuard(transitionsBuilder);
+                transition.getGuardReturn().setOperand(writeFsmMachineOp.getArgument(2));
+            }
+        }
+    }
+
+    // Instantiate FSMs
     builder.setInsertionPointToStart(hwModuleOp.getBodyBlock());
+    mlir::Value value0 = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(false));
+    mlir::Value value1 = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(true));
 
     auto readFsmInstanceOp =
         builder.create<circt::fsm::HWInstanceOp>(readStateFsmOutputTypes, "ReadFSM", readFsmMachineOp.getSymName(),
-                                                 readStateFsmInputValues, moduleGetInputValue("clock"), moduleGetInputValue("reset"));
+                                                 readStateFsmInputValues, clock, reset);
 
     for (unsigned int i = 0; i < readFsmInstanceOp.getNumResults(); i++)
         hwModuleOutputValues[moduleGetAxiOutputIndex(readStateFsmOutputs[i].first)] =
             readFsmInstanceOp.getResult(i);
+
+    auto writeFsmInstanceOp =
+        builder.create<circt::fsm::HWInstanceOp>(writeStateFsmOutputTypes, "WriteFSM", writeFsmMachineOp.getSymName(),
+                                                 writeStateFsmInputValues, clock, reset);
+
+    for (unsigned int i = 0; i < writeFsmMachineOp.getNumResults(); i++)
+        hwModuleOutputValues[moduleGetAxiOutputIndex(writeStateFsmOutputs[i].first)] =
+            writeFsmInstanceOp.getResult(i);
+
+    // ControlAXI logic
+    hwModuleOutputValues[moduleGetAxiOutputIndex("rresp")] = builder.create<circt::hw::ConstantOp>(builder.getI2Type(), 0);
+    hwModuleOutputValues[moduleGetAxiOutputIndex("bresp")] = builder.create<circt::hw::ConstantOp>(builder.getI2Type(), 0);
+
+    // Write address. Store it into a register
+    mlir::Value awaddr_next = builder.create<circt::sv::LogicOp>(axiAddrWidthType, "awaddr_next");
+    mlir::Value awaddr_next_read = builder.create<circt::sv::ReadInOutOp>(awaddr_next);
+    mlir::Value awaddr_reg = builder.create<circt::seq::CompRegOp>(awaddr_next_read, clock, reset,
+                                                                   builder.create<circt::hw::ConstantOp>(axiAddrWidthType, 0), "awaddr_reg");
+    mlir::Value writeToAwaddrReg = builder.create<circt::comb::AndOp>(moduleGetAxiInputValue("awvalid"),
+                                                                      hwModuleOutputValues[moduleGetAxiOutputIndex("awready")]);
+    builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
+        builder.create<circt::sv::IfOp>(
+            writeToAwaddrReg,
+            /*thenCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(awaddr_next, moduleGetAxiInputValue("awaddr")); },
+            /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(awaddr_next, awaddr_reg); });
+    });
+
+    // Control Register Signals (offset 0x00)
+    mlir::Value int_ap_start_next = builder.create<circt::sv::LogicOp>(builder.getI1Type(), "int_ap_start_next");
+    mlir::Value int_ap_start_next_read = builder.create<circt::sv::ReadInOutOp>(int_ap_start_next);
+    mlir::Value int_ap_start = builder.create<circt::seq::CompRegOp>(int_ap_start_next_read, clock, reset, value0, "int_ap_start_reg");
+
+    mlir::Value int_ap_done_next = builder.create<circt::sv::LogicOp>(builder.getI1Type(), "int_ap_done_next");
+    mlir::Value int_ap_done_next_read = builder.create<circt::sv::ReadInOutOp>(int_ap_done_next);
+    mlir::Value int_ap_done = builder.create<circt::seq::CompRegOp>(int_ap_done_next_read, clock, reset, value0, "int_ap_done_reg");
+
+    mlir::Value int_ap_idle_next = builder.create<circt::sv::LogicOp>(builder.getI1Type(), "int_ap_idle_next");
+    mlir::Value int_ap_idle_next_read = builder.create<circt::sv::ReadInOutOp>(int_ap_idle_next);
+    mlir::Value int_ap_idle = builder.create<circt::seq::CompRegOp>(int_ap_idle_next_read, clock, reset, value1, "int_ap_idle_reg");
+
+    mlir::Value isWaddr0x00 = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq,
+                                                                  awaddr_reg,
+                                                                  builder.create<circt::hw::ConstantOp>(axiAddrWidthType, 0));
+    mlir::Value writeToControlReg = builder.create<circt::comb::AndOp>(moduleGetAxiInputValue("wvalid"),
+                                                                       hwModuleOutputValues[moduleGetAxiOutputIndex("wready")]);
+    writeToControlReg = builder.create<circt::comb::AndOp>(writeToControlReg, isWaddr0x00);
+
+    builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
+        builder.create<circt::sv::IfOp>(
+            writeToControlReg,
+            /*thenCtor*/ [&]() {
+                mlir::Value apStartBit = builder.create<circt::comb::ExtractOp>(moduleGetAxiInputValue("wdata"), 0, 1);
+                builder.create<circt::sv::BPAssignOp>(int_ap_start_next, apStartBit); },
+            /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ap_start_next, value0); });
+    });
 
     int idx = 0;
     for (auto &output : hwModuleOutputValues) {
