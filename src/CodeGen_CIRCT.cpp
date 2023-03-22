@@ -256,42 +256,10 @@ void CodeGen_CIRCT::flattenKernelArguments(const std::vector<LoweredArgument> &i
 }
 
 void CodeGen_CIRCT::createCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder) {
-    static constexpr int AXI_DATA_WIDTH = 32;
-    struct AxiSignalInfo {
-        std::string name;
-        mlir::Type type;
-        circt::hw::PortDirection direction;
-    };
-
+    // AXI4 Manager signals
     // araddr, awaddr, wdata and rdata are connected directly outside the FSM module
-    const mlir::SmallVector<AxiSignalInfo> axiSignals = {
-        // AXI4 master interface (read)
-        // Read address channel
-        {"arvalid", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
-        {"arready", builder.getI1Type(), circt::hw::PortDirection::INPUT},
-        {"arlen", builder.getI8Type(), circt::hw::PortDirection::OUTPUT},
-        // Read data channel
-        {"rvalid", builder.getI1Type(), circt::hw::PortDirection::INPUT},
-        {"rready", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
-        {"rlast", builder.getI1Type(), circt::hw::PortDirection::INPUT},
-        // AXI4 master interface (write)
-        // Write address channel
-        {"awvalid", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
-        {"awready", builder.getI1Type(), circt::hw::PortDirection::INPUT},
-        {"awlen", builder.getI8Type(), circt::hw::PortDirection::OUTPUT},
-        // Write data channel
-        {"wvalid", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
-        {"wready", builder.getI1Type(), circt::hw::PortDirection::INPUT},
-        {"wstrb", builder.getIntegerType(AXI_DATA_WIDTH / 8), circt::hw::PortDirection::OUTPUT},
-        {"wlast", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
-        // Write response channel
-        {"bvalid", builder.getI1Type(), circt::hw::PortDirection::INPUT},
-        {"bready", builder.getI1Type(), circt::hw::PortDirection::OUTPUT},
-    };
-
-    auto toFullAxiSignalName = [](const std::string &name) {
-        return "m_axi_" + name;
-    };
+    mlir::SmallVector<circt::hw::PortInfo> axiSignals;
+    portsAddAXI4MSignals(builder, M_AXI_ADDR_WIDTH, M_AXI_DATA_WIDTH, axiSignals);
 
     mlir::SmallVector<mlir::Type> inputs, outputs;
     mlir::SmallVector<mlir::Attribute> inputNames, outputNames;
@@ -300,10 +268,10 @@ void CodeGen_CIRCT::createCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder) 
     for (const auto &signal : axiSignals) {
         if (signal.direction == circt::hw::PortDirection::INPUT) {
             inputs.push_back(signal.type);
-            inputNames.push_back(builder.getStringAttr(toFullAxiSignalName(signal.name)));
+            inputNames.push_back(builder.getStringAttr(signal.name.str()));
         } else {
             outputs.push_back(signal.type);
-            outputNames.push_back(builder.getStringAttr(toFullAxiSignalName(signal.name)));
+            outputNames.push_back(builder.getStringAttr(signal.name.str()));
         }
     }
 
@@ -331,7 +299,7 @@ void CodeGen_CIRCT::createCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder) 
 
     auto getAxiInputValue = [&](const std::string &name) {
         for (unsigned int i = 0; i < machineOp.getNumArguments(); i++) {
-            if (machineOp.getArgName(i) == toFullAxiSignalName(name))
+            if (machineOp.getArgName(i) == toFullAxiManagerSignalName(name))
                 return machineOp.getArgument(i);
         }
         return mlir::BlockArgument();
@@ -340,7 +308,7 @@ void CodeGen_CIRCT::createCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder) 
     auto getAxiOutputIndex = [&](const std::string &name) {
         unsigned int i = 0;
         for (i = 0; i < machineOp.getNumResults(); i++) {
-            if (machineOp.getResName(i) == toFullAxiSignalName(name))
+            if (machineOp.getResName(i) == toFullAxiManagerSignalName(name))
                 break;
         }
         return i;
@@ -348,7 +316,7 @@ void CodeGen_CIRCT::createCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder) 
 
     auto getAxiOutputType = [&](const std::string &name) {
         for (unsigned int i = 0; i < machineOp.getNumResults(); i++) {
-            if (machineOp.getResName(i) == toFullAxiSignalName(name))
+            if (machineOp.getResName(i) == toFullAxiManagerSignalName(name))
                 return machineOp.getResultTypes()[i];
         }
         return mlir::Type();
@@ -556,7 +524,7 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder, const 
     };
 
     auto moduleGetAxiInputValue = [&](const std::string &name) {
-        return moduleGetInputValue(toFullAxiLiteSlaveSignalName(name));
+        return moduleGetInputValue(toFullAxiSubordinateSignalName(name));
     };
 
     auto moduleGetOutputIndex = [&](const std::string &name) {
@@ -571,7 +539,7 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder, const 
     };
 
     auto moduleGetAxiOutputIndex = [&](const std::string &name) {
-        return moduleGetOutputIndex(toFullAxiLiteSlaveSignalName(name));
+        return moduleGetOutputIndex(toFullAxiSubordinateSignalName(name));
     };
 
     mlir::Value clock = moduleGetInputValue("clock");
@@ -594,12 +562,12 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder, const 
         for (const auto &input : readStateFsmInputs) {
             fsmInputTypes.push_back(input.second.getType());
             readStateFsmInputValues.push_back(input.second);
-            fsmInputNames.push_back(builder.getStringAttr(toFullAxiLiteSlaveSignalName(input.first)));
+            fsmInputNames.push_back(builder.getStringAttr(toFullAxiSubordinateSignalName(input.first)));
         }
 
         for (const auto &output : readStateFsmOutputs) {
             readStateFsmOutputTypes.push_back(hwModuleOp.getResultTypes()[output.second]);
-            fsmOutputNames.push_back(builder.getStringAttr(toFullAxiLiteSlaveSignalName(output.first)));
+            fsmOutputNames.push_back(builder.getStringAttr(toFullAxiSubordinateSignalName(output.first)));
         }
 
         mlir::FunctionType fsmFunctionType = builder.getFunctionType(fsmInputTypes, readStateFsmOutputTypes);
@@ -663,12 +631,12 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder, const 
         for (const auto &input : writeStateFsmInputs) {
             fsmInputTypes.push_back(input.second.getType());
             writeStateFsmInputValues.push_back(input.second);
-            fsmInputNames.push_back(builder.getStringAttr(toFullAxiLiteSlaveSignalName(input.first)));
+            fsmInputNames.push_back(builder.getStringAttr(toFullAxiSubordinateSignalName(input.first)));
         }
 
         for (const auto &output : writeStateFsmOutputs) {
             writeStateFsmOutputTypes.push_back(hwModuleOp.getResultTypes()[output.second]);
-            fsmOutputNames.push_back(builder.getStringAttr(toFullAxiLiteSlaveSignalName(output.first)));
+            fsmOutputNames.push_back(builder.getStringAttr(toFullAxiSubordinateSignalName(output.first)));
         }
 
         mlir::FunctionType fsmFunctionType = builder.getFunctionType(fsmInputTypes, writeStateFsmOutputTypes);
@@ -1023,7 +991,7 @@ void CodeGen_CIRCT::generateToplevel(mlir::ImplicitLocOpBuilder &builder, const 
     };
 
     auto moduleGetAxi4LiteInputValue = [&](const std::string &name) {
-        return moduleGetInputValue(toFullAxiLiteSlaveSignalName(name));
+        return moduleGetInputValue(toFullAxiSubordinateSignalName(name));
     };
 
     auto moduleGetOutputIndex = [](auto &mod, const std::string &name) {
@@ -1037,6 +1005,7 @@ void CodeGen_CIRCT::generateToplevel(mlir::ImplicitLocOpBuilder &builder, const 
         return i;
     };
 
+    mlir::Value clock = moduleGetInputValue("ap_clk");
     // Create reset signal from ap_rst_n
     mlir::Value reset = builder.create<circt::comb::XorOp>(moduleGetInputValue("ap_rst_n"),
                                                            builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(1)));
@@ -1050,7 +1019,7 @@ void CodeGen_CIRCT::generateToplevel(mlir::ImplicitLocOpBuilder &builder, const 
     mlir::SmallVector<mlir::Type> controlAxiResultTypes;
     mlir::SmallVector<mlir::Attribute> controlAxiArgNames, controlAxiResultNames;
 
-    controlAxiInputs.push_back(moduleGetInputValue("ap_clk"));
+    controlAxiInputs.push_back(clock);
     controlAxiArgNames.push_back(builder.getStringAttr("clock"));
     controlAxiInputs.push_back(reset);
     controlAxiArgNames.push_back(builder.getStringAttr("reset"));
@@ -1202,6 +1171,43 @@ void CodeGen_CIRCT::generateKernelXml(const std::string &kernelName, const Flatt
     std::cout << printer.CStr() << std::endl;
 }
 
+void CodeGen_CIRCT::portsAddAXI4MSignals(mlir::ImplicitLocOpBuilder &builder, int addrWidth, int dataWidth, mlir::SmallVector<circt::hw::PortInfo> &ports) {
+    struct SignalInfo {
+        std::string name;
+        int size;
+        bool input;
+    };
+
+    const mlir::SmallVector<SignalInfo> signals = {
+        // Read address channel
+        {"arvalid", 1, false},
+        {"arready", 1, true},
+        {"arlen", 8, false},
+        // Read data channel
+        {"rvalid", 1, true},
+        {"rready", 1, false},
+        {"rlast", 1, true},
+        // Write address channel
+        {"awvalid", 1, false},
+        {"awready", 1, true},
+        {"awlen", 8, false},
+        // Write data channel
+        {"wvalid", 1, false},
+        {"wready", 1, true},
+        {"wstrb", dataWidth / 8, false},
+        {"wlast", 1, false},
+        // Write response channel
+        {"bvalid", 1, true},
+        {"bready", 1, false},
+    };
+
+    for (const auto &signal : signals) {
+        ports.push_back(circt::hw::PortInfo{builder.getStringAttr(toFullAxiManagerSignalName(signal.name)),
+                                            signal.input ? circt::hw::PortDirection::INPUT : circt::hw::PortDirection::OUTPUT,
+                                            builder.getIntegerType(signal.size)});
+    }
+}
+
 void CodeGen_CIRCT::portsAddAXI4LiteSignals(mlir::ImplicitLocOpBuilder &builder, int addrWidth, int dataWidth, mlir::SmallVector<circt::hw::PortInfo> &ports) {
     struct SignalInfo {
         std::string name;
@@ -1234,7 +1240,7 @@ void CodeGen_CIRCT::portsAddAXI4LiteSignals(mlir::ImplicitLocOpBuilder &builder,
     };
 
     for (const auto &signal : signals) {
-        ports.push_back(circt::hw::PortInfo{builder.getStringAttr(toFullAxiLiteSlaveSignalName(signal.name)),
+        ports.push_back(circt::hw::PortInfo{builder.getStringAttr(toFullAxiSubordinateSignalName(signal.name)),
                                             signal.input ? circt::hw::PortDirection::INPUT : circt::hw::PortDirection::OUTPUT,
                                             builder.getIntegerType(signal.size)});
     }
