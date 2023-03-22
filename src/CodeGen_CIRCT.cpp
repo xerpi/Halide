@@ -3,6 +3,7 @@
 
 #include <tinyxml2.h>
 
+#include <llvm/Support/FileSystem.h>
 #include <llvm/Support/ToolOutputFile.h>
 
 #include <mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h>
@@ -64,6 +65,8 @@ CodeGen_CIRCT::CodeGen_CIRCT() {
 
 void CodeGen_CIRCT::compile(const Module &module) {
     debug(1) << "Generating CIRCT MLIR IR for module " << module.name() << "\n";
+
+    const std::string outputDir = "generated_" + module.name();
 
     circt::LoweringOptions opts;
     opts.emittedLineLength = 200;
@@ -138,20 +141,28 @@ void CodeGen_CIRCT::compile(const Module &module) {
 
     auto pmSCFToCalyxRunResult = pmSCFToCalyx.run(mlir_module);
     std::cout << "[SCF to Calyx] Result: " << pmSCFToCalyxRunResult.succeeded() << std::endl;
-
-    // Print MLIR after running passes
-    std::cout << "[SCF to Calyx] MLIR:" << std::endl;
-    mlir_module.dump();
+    if (!pmSCFToCalyxRunResult.succeeded()) {
+        std::cout << "[SCF to Calyx] MLIR:" << std::endl;
+        mlir_module.dump();
+    }
     internal_assert(pmSCFToCalyxRunResult.succeeded());
+
+    // Create output directory (if it doesn't exist)
+    llvm::sys::fs::create_directories(outputDir);
 
     // Emit Calyx
     if (pmSCFToCalyxRunResult.succeeded()) {
         std::string str;
         llvm::raw_string_ostream os(str);
-        std::cout << "Exporting Calyx." << std::endl;
+        std::cout << "[Exporting Calyx]" << std::endl;
         auto exportVerilogResult = circt::calyx::exportCalyx(mlir_module, os);
-        std::cout << "Export Calyx result: " << exportVerilogResult.succeeded() << std::endl;
-        std::cout << str << std::endl;
+        std::cout << "[Export Calyx] Result: " << exportVerilogResult.succeeded() << std::endl;
+
+        auto output = mlir::openOutputFile(outputDir + "/" + function.name + ".futil");
+        if (output) {
+            output->os() << str;
+            output->keep();
+        }
     }
 
     std::cout << "[Calyx to FSM] Start." << std::endl;
@@ -169,29 +180,26 @@ void CodeGen_CIRCT::compile(const Module &module) {
 
     auto pmCalyxToFSMRunResult = pmCalyxToFSM.run(mlir_module);
     std::cout << "[Calyx to FSM] Result: " << pmCalyxToFSMRunResult.succeeded() << std::endl;
-
-    // Print MLIR after running passes
-    std::cout << "[Calyx to FSM] MLIR:" << std::endl;
-    mlir_module.dump();
+    if (!pmCalyxToFSMRunResult.succeeded()) {
+        std::cout << "[Calyx to FSM] MLIR:" << std::endl;
+        mlir_module.dump();
+    }
     internal_assert(pmCalyxToFSMRunResult.succeeded());
 
     // Create Calyx external memory to AXI interface
     builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
+    std::cout << "[Adding CalyxExtMemToAxi]" << std::endl;
     generateCalyxExtMemToAxi(builder);
-    std::cout << "[Adding CalyxExtMemToAxi] MLIR:" << std::endl;
-    mlir_module.dump();
 
     // Add AXI control
     builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
+    std::cout << "[Adding Control AXI]" << std::endl;
     generateControlAxi(builder, flattenedKernelArgs);
-    std::cout << "[Adding Control AXI] MLIR:" << std::endl;
-    mlir_module.dump();
 
     // Add toplevel
     builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
+    std::cout << "[Adding Toplevel]" << std::endl;
     generateToplevel(builder, function.name, flattenedKernelArgs);
-    std::cout << "[Adding Toplevel] MLIR:" << std::endl;
-    mlir_module.dump();
 
     std::cout << "[FSM to SV] Start." << std::endl;
     mlir::PassManager pmFSMtoSV(mlir_module.getContext());
@@ -202,23 +210,20 @@ void CodeGen_CIRCT::compile(const Module &module) {
 
     auto pmFSMtoSVRunResult = pmFSMtoSV.run(mlir_module);
     std::cout << "[FSM to SV] Result: " << pmFSMtoSVRunResult.succeeded() << std::endl;
-
-    // Print MLIR after running passes
-    std::cout << "[FSM to SV] MLIR:" << std::endl;
-    mlir_module.dump();
+    if (!pmFSMtoSVRunResult.succeeded()) {
+        std::cout << "[FSM to SV] MLIR:" << std::endl;
+        mlir_module.dump();
+    }
     internal_assert(pmFSMtoSVRunResult.succeeded());
 
     // Emit Verilog
     if (pmFSMtoSVRunResult.succeeded()) {
-        std::string dirName = "generated_" + module.name();
-        std::cout << "Exporting Verilog." << std::endl;
-        auto exportVerilogResult = circt::exportSplitVerilog(mlir_module, dirName);
-        std::cout << "Export Verilog result: " << exportVerilogResult.succeeded() << std::endl;
+        std::cout << "[Exporting Verilog]" << std::endl;
+        auto exportVerilogResult = circt::exportSplitVerilog(mlir_module, outputDir);
+        std::cout << "[Export Verilog] Result: " << exportVerilogResult.succeeded() << std::endl;
 
-        std::cout << "Generating kernel.xml" << std::endl;
-
-        // Open the output file.
-        auto output = mlir::openOutputFile(dirName + "/kernel.xml");
+        std::cout << "[Generating kernel.xml]" << std::endl;
+        auto output = mlir::openOutputFile(outputDir + "/kernel.xml");
         if (output) {
             generateKernelXml(output->os(), function.name, flattenedKernelArgs);
             output->keep();
