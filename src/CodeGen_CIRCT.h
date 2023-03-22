@@ -115,6 +115,7 @@ private:
     static constexpr int S_AXI_DATA_WIDTH = 32;
 
     static constexpr char AXI_MANAGER_PREFIX[] = "m_axi_";
+    static constexpr char AXI_CONTROL_PREFIX[] = "s_axi_control";
 
     static void flattenKernelArguments(const std::vector<LoweredArgument> &inArgs, FlattenedKernelArgs &args);
 
@@ -142,7 +143,7 @@ private:
     };
 
     static std::string toFullAxiSubordinateSignalName(const std::string &name) {
-        return "s_axi_" + name;
+        return std::string(AXI_CONTROL_PREFIX) + "_" + name;
     };
 
     static std::string fullAxiSignalNameIdGetBasename(const std::string &name) {
