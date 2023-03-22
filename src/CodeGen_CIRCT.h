@@ -118,7 +118,7 @@ private:
 
     static void flattenKernelArguments(const std::vector<LoweredArgument> &inArgs, FlattenedKernelArgs &args);
 
-    static void generateKernelXml(const std::string &kernelName, const FlattenedKernelArgs &kernelArgs);
+    static void generateKernelXml(llvm::raw_ostream &os, const std::string &kernelName, const FlattenedKernelArgs &kernelArgs);
     static void generateCalyxExtMemToAxi(mlir::ImplicitLocOpBuilder &builder);
     static void generateControlAxi(mlir::ImplicitLocOpBuilder &builder, const FlattenedKernelArgs &kernelArgs);
     static void generateToplevel(mlir::ImplicitLocOpBuilder &builder, const std::string &kernelName, const FlattenedKernelArgs &kernelArgs);
