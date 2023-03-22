@@ -174,13 +174,13 @@ void CodeGen_CIRCT::compile(const Module &module) {
 
     // Create Calyx external memory to AXI interface
     builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
-    createCalyxExtMemToAXI(builder);
+    generateCalyxExtMemToAXI(builder);
     std::cout << "[Adding CalyxExtMemToAXI] MLIR:" << std::endl;
     mlir_module.dump();
 
     // Add AXI control
     builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
-    createControlAxi(builder, flattenedKernelArgs);
+    generateControlAxi(builder, flattenedKernelArgs);
     std::cout << "[Adding Control AXI] MLIR:" << std::endl;
     mlir_module.dump();
 
@@ -255,11 +255,11 @@ void CodeGen_CIRCT::flattenKernelArguments(const std::vector<LoweredArgument> &i
     }
 }
 
-void CodeGen_CIRCT::createCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder) {
+void CodeGen_CIRCT::generateCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder) {
     // AXI4 Manager signals
     // araddr, awaddr, wdata and rdata are connected directly outside the FSM module
     mlir::SmallVector<circt::hw::PortInfo> axiSignals;
-    portsAddAXI4MSignals(builder, M_AXI_ADDR_WIDTH, M_AXI_DATA_WIDTH, axiSignals);
+    portsAddAXI4ManagerSignals(builder, M_AXI_ADDR_WIDTH, M_AXI_DATA_WIDTH, axiSignals);
 
     mlir::SmallVector<mlir::Type> inputs, outputs;
     mlir::SmallVector<mlir::Attribute> inputNames, outputNames;
@@ -482,7 +482,7 @@ void CodeGen_CIRCT::createCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder) 
     }
 }
 
-void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder, const FlattenedKernelArgs &kernelArgs) {
+void CodeGen_CIRCT::generateControlAxi(mlir::ImplicitLocOpBuilder &builder, const FlattenedKernelArgs &kernelArgs) {
     mlir::Type axiAddrWidthType = builder.getIntegerType(S_AXI_ADDR_WIDTH);
     mlir::Type axiDataWidthType = builder.getIntegerType(S_AXI_DATA_WIDTH);
 
@@ -498,7 +498,7 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder, const 
     ports.push_back(circt::hw::PortInfo{builder.getStringAttr("ap_done"), circt::hw::PortDirection::INPUT, builder.getI1Type()});
 
     // AXI signals
-    portsAddAXI4LiteSignals(builder, S_AXI_ADDR_WIDTH, S_AXI_DATA_WIDTH, ports);
+    portsAddAXI4LiteSubordinateSignals(builder, S_AXI_ADDR_WIDTH, S_AXI_DATA_WIDTH, ports);
 
     // Kernel arguments
     for (const auto &arg : kernelArgs) {
@@ -963,7 +963,7 @@ void CodeGen_CIRCT::generateToplevel(mlir::ImplicitLocOpBuilder &builder, const 
 
     // AXI4 lite subordinate control signals
     mlir::SmallVector<circt::hw::PortInfo> axi4LiteSignals;
-    portsAddAXI4LiteSignals(builder, S_AXI_ADDR_WIDTH, S_AXI_DATA_WIDTH, axi4LiteSignals);
+    portsAddAXI4LiteSubordinateSignals(builder, S_AXI_ADDR_WIDTH, S_AXI_DATA_WIDTH, axi4LiteSignals);
     ports.append(axi4LiteSignals);
 
     // Create toplevel HW module
@@ -1171,7 +1171,7 @@ void CodeGen_CIRCT::generateKernelXml(const std::string &kernelName, const Flatt
     std::cout << printer.CStr() << std::endl;
 }
 
-void CodeGen_CIRCT::portsAddAXI4MSignals(mlir::ImplicitLocOpBuilder &builder, int addrWidth, int dataWidth, mlir::SmallVector<circt::hw::PortInfo> &ports) {
+void CodeGen_CIRCT::portsAddAXI4ManagerSignals(mlir::ImplicitLocOpBuilder &builder, int addrWidth, int dataWidth, mlir::SmallVector<circt::hw::PortInfo> &ports) {
     struct SignalInfo {
         std::string name;
         int size;
@@ -1208,7 +1208,7 @@ void CodeGen_CIRCT::portsAddAXI4MSignals(mlir::ImplicitLocOpBuilder &builder, in
     }
 }
 
-void CodeGen_CIRCT::portsAddAXI4LiteSignals(mlir::ImplicitLocOpBuilder &builder, int addrWidth, int dataWidth, mlir::SmallVector<circt::hw::PortInfo> &ports) {
+void CodeGen_CIRCT::portsAddAXI4LiteSubordinateSignals(mlir::ImplicitLocOpBuilder &builder, int addrWidth, int dataWidth, mlir::SmallVector<circt::hw::PortInfo> &ports) {
     struct SignalInfo {
         std::string name;
         int size;

@@ -23,44 +23,9 @@ namespace Internal {
 
 class CodeGen_CIRCT {
 public:
-    struct KernelArg {
-        std::string name;
-        Type type;
-        bool isPointer = false;
-
-        int getHWBits() const {
-            return isPointer ? 64 : type.bits();
-        }
-    };
-    using FlattenedKernelArgs = std::vector<KernelArg>;
-
-    // XRT-Managed Kernels Control Requirements
-    // See https://docs.xilinx.com/r/en-US/ug1393-vitis-application-acceleration/Control-Requirements-for-XRT-Managed-Kernels
-    static constexpr uint64_t XRT_KERNEL_ARGS_OFFSET = 0x10;
-    static constexpr int M_AXI_ADDR_WIDTH = 64;
-    static constexpr int M_AXI_DATA_WIDTH = 32;
-    static constexpr int S_AXI_ADDR_WIDTH = 32;
-    static constexpr int S_AXI_DATA_WIDTH = 32;
-
     CodeGen_CIRCT();
 
     void compile(const Module &module);
-    static void flattenKernelArguments(const std::vector<LoweredArgument> &inArgs, FlattenedKernelArgs &args);
-    void createCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder);
-    void createControlAxi(mlir::ImplicitLocOpBuilder &builder, const FlattenedKernelArgs &kernelArgs);
-    void generateToplevel(mlir::ImplicitLocOpBuilder &builder, const std::string &kernelName, const FlattenedKernelArgs &kernelArgs);
-    static void generateKernelXml(const std::string &kernelName, const FlattenedKernelArgs &kernelArgs);
-
-    void portsAddAXI4MSignals(mlir::ImplicitLocOpBuilder &builder, int addrWidth, int dataWidth, mlir::SmallVector<circt::hw::PortInfo> &ports);
-    void portsAddAXI4LiteSignals(mlir::ImplicitLocOpBuilder &builder, int addrWidth, int dataWidth, mlir::SmallVector<circt::hw::PortInfo> &ports);
-
-    static std::string toFullAxiManagerSignalName(const std::string &name) {
-        return "m_axi_" + name;
-    };
-
-    static std::string toFullAxiSubordinateSignalName(const std::string &name) {
-        return "s_axi_" + name;
-    };
 
 protected:
     class Visitor : public IRVisitor {
@@ -130,6 +95,45 @@ protected:
     };
 
 private:
+    struct KernelArg {
+        std::string name;
+        Type type;
+        bool isPointer = false;
+
+        int getHWBits() const {
+            return isPointer ? 64 : type.bits();
+        }
+    };
+    using FlattenedKernelArgs = std::vector<KernelArg>;
+
+    // XRT-Managed Kernels Control Requirements
+    // See https://docs.xilinx.com/r/en-US/ug1393-vitis-application-acceleration/Control-Requirements-for-XRT-Managed-Kernels
+    static constexpr uint64_t XRT_KERNEL_ARGS_OFFSET = 0x10;
+    static constexpr int M_AXI_ADDR_WIDTH = 64;
+    static constexpr int M_AXI_DATA_WIDTH = 32;
+    static constexpr int S_AXI_ADDR_WIDTH = 32;
+    static constexpr int S_AXI_DATA_WIDTH = 32;
+
+    static void flattenKernelArguments(const std::vector<LoweredArgument> &inArgs, FlattenedKernelArgs &args);
+
+    static void generateKernelXml(const std::string &kernelName, const FlattenedKernelArgs &kernelArgs);
+    static void generateCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder);
+    static void generateControlAxi(mlir::ImplicitLocOpBuilder &builder, const FlattenedKernelArgs &kernelArgs);
+    static void generateToplevel(mlir::ImplicitLocOpBuilder &builder, const std::string &kernelName, const FlattenedKernelArgs &kernelArgs);
+
+    static void portsAddAXI4ManagerSignals(mlir::ImplicitLocOpBuilder &builder, int addrWidth, int dataWidth,
+                                           mlir::SmallVector<circt::hw::PortInfo> &ports);
+    static void portsAddAXI4LiteSubordinateSignals(mlir::ImplicitLocOpBuilder &builder, int addrWidth, int dataWidth,
+                                                   mlir::SmallVector<circt::hw::PortInfo> &ports);
+
+    static std::string toFullAxiManagerSignalName(const std::string &name) {
+        return "m_axi_" + name;
+    };
+
+    static std::string toFullAxiSubordinateSignalName(const std::string &name) {
+        return "s_axi_" + name;
+    };
+
     mlir::MLIRContext mlir_context;
 };
 
