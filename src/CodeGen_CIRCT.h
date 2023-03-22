@@ -35,8 +35,10 @@ public:
     using FlattenedKernelArgs = std::vector<KernelArg>;
 
     // XRT-Managed Kernels Control Requirements
-    static constexpr uint64_t XRT_KERNEL_ARGS_OFFSET = 0x10;
     // See https://docs.xilinx.com/r/en-US/ug1393-vitis-application-acceleration/Control-Requirements-for-XRT-Managed-Kernels
+    static constexpr uint64_t XRT_KERNEL_ARGS_OFFSET = 0x10;
+    static constexpr int M_AXI_ADDR_WIDTH = 64;
+    static constexpr int M_AXI_DATA_WIDTH = 32;
     static constexpr int S_AXI_ADDR_WIDTH = 32;
     static constexpr int S_AXI_DATA_WIDTH = 32;
 
@@ -49,9 +51,14 @@ public:
     void generateToplevel(mlir::ImplicitLocOpBuilder &builder, const std::string &kernelName, const FlattenedKernelArgs &kernelArgs);
     static void generateKernelXml(const std::string &kernelName, const FlattenedKernelArgs &kernelArgs);
 
+    void portsAddAXI4MSignals(mlir::ImplicitLocOpBuilder &builder, int addrWidth, int dataWidth, mlir::SmallVector<circt::hw::PortInfo> &ports);
     void portsAddAXI4LiteSignals(mlir::ImplicitLocOpBuilder &builder, int addrWidth, int dataWidth, mlir::SmallVector<circt::hw::PortInfo> &ports);
 
-    std::string toFullAxiLiteSlaveSignalName(const std::string &name) {
+    static std::string toFullAxiManagerSignalName(const std::string &name) {
+        return "m_axi_" + name;
+    };
+
+    static std::string toFullAxiSubordinateSignalName(const std::string &name) {
         return "s_axi_" + name;
     };
 
