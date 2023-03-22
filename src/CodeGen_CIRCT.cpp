@@ -790,8 +790,8 @@ void CodeGen_CIRCT::generateControlAxi(mlir::ImplicitLocOpBuilder &builder, cons
             /*thenCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ap_done_next, value0); },
             /*elseCtor*/ [&]() { builder.create<circt::sv::IfOp>(
                                      moduleGetInputValue("ap_done"),
-                                     /*thenCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ap_start_next, value1); },
-                                     /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ap_start_next, int_ap_done); }); });
+                                     /*thenCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ap_done_next, value1); },
+                                     /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ap_done_next, int_ap_done); }); });
     });
 
     mlir::Value int_ap_idle_next = builder.create<circt::sv::LogicOp>(builder.getI1Type(), "int_ap_idle_next");
