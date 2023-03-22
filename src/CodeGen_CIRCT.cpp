@@ -877,14 +877,14 @@ void CodeGen_CIRCT::generateControlAxi(mlir::ImplicitLocOpBuilder &builder, cons
         while (size < arg.getHWBits()) {
             mlir::Value isWaddrToSubArgAddr = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq, awaddr_reg,
                                                                                   builder.create<circt::hw::ConstantOp>(axiAddrWidthType, subArgOffset));
+            mlir::Value startBit = builder.create<circt::hw::ConstantOp>(axiAddrWidthType, size);
+            mlir::Value bitsToUpdate = builder.create<circt::sv::IndexedPartSelectInOutOp>(argRegNext, startBit, 32);
             builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
                 builder.create<circt::sv::IfOp>(
                     builder.create<circt::comb::AndOp>(isWriteValidReady, isWaddrToSubArgAddr),
-                    /*thenCtor*/ [&]() {
-                        mlir::Value base = builder.create<circt::hw::ConstantOp>(axiAddrWidthType, size);
-                        mlir::Value bitsToUpdate = builder.create<circt::sv::IndexedPartSelectInOutOp>(argRegNext, base, 32);
-                        builder.create<circt::sv::BPAssignOp>(bitsToUpdate, moduleGetAxiInputValue("wdata")); },
-                    /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(argRegNext, argReg); });
+                    /*thenCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(bitsToUpdate, moduleGetAxiInputValue("wdata")); },
+                    /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(bitsToUpdate,
+                                                                               builder.create<circt::sv::IndexedPartSelectOp>(argReg, startBit, 32)); });
             });
 
             size += 32;
