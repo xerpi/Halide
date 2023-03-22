@@ -919,6 +919,39 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder, const 
                 builder.create<circt::sv::BPAssignOp>(int_isr_ready_next, int_isr_ready); });
     });
 
+    // Create registers storing kernel arguments (scalars and buffer pointers)
+    uint32_t argOffset = XRT_KERNEL_ARGS_OFFSET;
+    for (const auto &arg : kernelArgs) {
+        mlir::Type type = builder.getIntegerType(arg.size);
+        mlir::Value zero = builder.create<circt::hw::ConstantOp>(type, 0);
+        mlir::Value argRegNext = builder.create<circt::sv::LogicOp>(type, arg.name + "_next");
+        mlir::Value argRegNextRead = builder.create<circt::sv::ReadInOutOp>(argRegNext);
+        mlir::Value argReg = builder.create<circt::seq::CompRegOp>(argRegNextRead, clock, reset, zero, arg.name + "_reg");
+
+        // Implement the store logic
+        int size = 0;
+        uint32_t subArgOffset = argOffset;
+        while (size < arg.size) {
+            mlir::Value isWaddrToSubArgAddr = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq, awaddr_reg,
+                                                                                  builder.create<circt::hw::ConstantOp>(axiAddrWidthType, subArgOffset));
+            builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
+                builder.create<circt::sv::IfOp>(
+                    builder.create<circt::comb::AndOp>(isWriteValidReady, isWaddrToSubArgAddr),
+                    /*thenCtor*/ [&]() {
+                        mlir::Value base = builder.create<circt::hw::ConstantOp>(axiAddrWidthType, size);
+                        mlir::Value bitsToUpdate = builder.create<circt::sv::IndexedPartSelectInOutOp>(argRegNext, base, 32);
+                        builder.create<circt::sv::BPAssignOp>(bitsToUpdate, moduleGetAxiInputValue("wdata")); },
+                    /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(argRegNext, argReg); });
+            });
+
+            size += 32;
+            subArgOffset += 4;
+        }
+        hwModuleOutputValues[moduleGetOutputIndex(arg.name)] = argReg;
+        argOffset += 8;
+    }
+
+    // Holds the data that the host requested to read
     mlir::Value rdata_next = builder.create<circt::sv::LogicOp>(axiDataWidthType, "rdata_next");
     mlir::Value rdata_next_read = builder.create<circt::sv::ReadInOutOp>(rdata_next);
     mlir::Value rdata = builder.create<circt::seq::CompRegOp>(rdata_next_read, clock, reset,
@@ -926,17 +959,7 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder, const 
                                                               "rdata_reg");
     hwModuleOutputValues[moduleGetAxiOutputIndex("rdata")] = rdata;
 
-    // Create registers storing kernel arguments (scalars and buffer pointers)
-    for (const auto &arg : kernelArgs) {
-        mlir::Type type = builder.getIntegerType(arg.size);
-        mlir::Value zero = builder.create<circt::hw::ConstantOp>(type, 0);
-        mlir::Value argRegNext = builder.create<circt::sv::LogicOp>(type, arg.name + "_next");
-        mlir::Value argRegNextRead = builder.create<circt::sv::ReadInOutOp>(argRegNext);
-        mlir::Value argReg = builder.create<circt::seq::CompRegOp>(argRegNextRead, clock, reset, zero, arg.name + "_reg");
-        hwModuleOutputValues[moduleGetOutputIndex(arg.name)] = argReg;
-    }
-
-    // 4 registers + num kernel arguments (each is 8B)
+    // 4 registers + number of kernel arguments (each is considered to be have 8 bytes)
     const size_t numCases = 4 + kernelArgs.size() * 2;
 
     builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
@@ -979,7 +1002,7 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder, const 
                                     int_isr_ready, int_isr_done});
                                 break;
                             default:
-                                const KernelArg &arg = kernelArgs[(offset - 0x10) >> 3];
+                                const KernelArg &arg = kernelArgs[(offset - XRT_KERNEL_ARGS_OFFSET) >> 3];
                                 if ((offset % 8) == 0 || arg.size > 32) {
                                     value = builder.create<circt::comb::ExtractOp>(hwModuleOutputValues[moduleGetOutputIndex(arg.name)],
                                                                                    (offset % 8) * 8, 32);
@@ -1073,7 +1096,7 @@ void CodeGen_CIRCT::generateKernelXml(const Internal::LoweredFunc &function) {
 
     uint64_t bufCnt = 0;
     uint64_t argIdx = 0;
-    uint64_t argOffset = 0x10;  // XRT-Managed Kernels Control Requirements
+    uint64_t argOffset = XRT_KERNEL_ARGS_OFFSET;
     for (const auto &arg : function.args) {
         if (arg.is_scalar() && arg.type.is_int_or_uint()) {
             pArgs->InsertEndChild(genArg(arg.name, 0, argIdx++, "s_axi_control", arg.type.bytes(),

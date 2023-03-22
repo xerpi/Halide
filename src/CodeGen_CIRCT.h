@@ -27,6 +27,9 @@ public:
     };
     using FlattenedKernelArgs = std::vector<KernelArg>;
 
+    // XRT-Managed Kernels Control Requirements
+    static constexpr uint64_t XRT_KERNEL_ARGS_OFFSET = 0x10;
+
     CodeGen_CIRCT();
 
     void compile(const Module &module);
