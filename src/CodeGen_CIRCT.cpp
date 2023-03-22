@@ -91,40 +91,18 @@ void CodeGen_CIRCT::compile(const Module &module) {
     flattenKernelArguments(function.args, flattenedKernelArgs);
 
     for (const auto &arg : flattenedKernelArgs) {
-        inputs.push_back(builder.getIntegerType(arg.size));
-        inputNames.push_back(arg.name);
-        argAttrs.push_back(builder.getDictionaryAttr(
-            builder.getNamedAttr(circt::scfToCalyx::sPortNameAttr, builder.getStringAttr(arg.name))));
-    }
-
-    for (const auto &arg : function.args) {
-        static const char *const kind_names[] = {
-            "InputScalar",
-            "InputBuffer",
-            "OutputBuffer",
-        };
-        static const char *const type_code_names[] = {
-            "int",
-            "uint",
-            "float",
-            "handle",
-            "bfloat",
-        };
-
-        debug(1) << "\t\tArg: " << arg.name << "\n";
-        debug(1) << "\t\t\tKind: " << kind_names[arg.kind] << "\n";
-        debug(1) << "\t\t\tDimensions: " << int(arg.dimensions) << "\n";
-        debug(1) << "\t\t\tType: " << type_code_names[arg.type.code()] << "\n";
-        debug(1) << "\t\t\tType bits: " << arg.type.bits() << "\n";
-        debug(1) << "\t\t\tType lanes: " << arg.type.lanes() << "\n";
-
-        if (arg.is_buffer()) {
-            // Treat buffers as 1D
+        if (arg.isPointer) {
+            // Add memref to the arguments. Treat buffers as 1D
             inputs.push_back(mlir::MemRefType::get({0}, builder.getIntegerType(arg.type.bits())));
             inputNames.push_back(arg.name + ".buffer");
             argAttrs.push_back(builder.getDictionaryAttr(
                 builder.getNamedAttr(circt::scfToCalyx::sSequentialReads, builder.getBoolAttr(true))));
         }
+
+        inputs.push_back(builder.getIntegerType(arg.getHWBits()));
+        inputNames.push_back(arg.name);
+        argAttrs.push_back(builder.getDictionaryAttr(
+            builder.getNamedAttr(circt::scfToCalyx::sPortNameAttr, builder.getStringAttr(arg.name))));
     }
 
     mlir::FunctionType functionType = builder.getFunctionType(inputs, results);
@@ -136,7 +114,7 @@ void CodeGen_CIRCT::compile(const Module &module) {
 
     builder.create<mlir::func::ReturnOp>();
 
-    generateKernelXml(function);
+    generateKernelXml(function.name, flattenedKernelArgs);
 
     // Print MLIR before running passes
     std::cout << "Original MLIR" << std::endl;
@@ -233,19 +211,39 @@ void CodeGen_CIRCT::compile(const Module &module) {
 
 void CodeGen_CIRCT::flattenKernelArguments(const std::vector<LoweredArgument> &inArgs, FlattenedKernelArgs &args) {
     for (const auto &arg : inArgs) {
+        static const char *const kind_names[] = {
+            "InputScalar",
+            "InputBuffer",
+            "OutputBuffer",
+        };
+        static const char *const type_code_names[] = {
+            "int",
+            "uint",
+            "float",
+            "handle",
+            "bfloat",
+        };
+
+        debug(1) << "\t\tArg: " << arg.name << "\n";
+        debug(1) << "\t\t\tKind: " << kind_names[arg.kind] << "\n";
+        debug(1) << "\t\t\tDimensions: " << int(arg.dimensions) << "\n";
+        debug(1) << "\t\t\tType: " << type_code_names[arg.type.code()] << "\n";
+        debug(1) << "\t\t\tType bits: " << arg.type.bits() << "\n";
+        debug(1) << "\t\t\tType lanes: " << arg.type.lanes() << "\n";
+
         if (arg.is_scalar() && arg.type.is_int_or_uint()) {
-            args.push_back({arg.name, arg.type.bits()});
+            args.push_back({arg.name, arg.type});
         } else if (arg.is_buffer()) {
             // A pointer to the start of the data in main memory (offset of the buffer into the AXI4 master interface)
-            args.push_back({arg.name + "_host", 64});
+            args.push_back({arg.name, arg.type, /*isPointer=*/true});
             // The dimensionality of the buffer
-            args.push_back({arg.name + "_dimensions", 32});
+            args.push_back({arg.name + "_dimensions", Int(32)});
 
             // Buffer dimensions
             for (int i = 0; i < arg.dimensions; i++) {
-                args.push_back({arg.name + "_dim_" + std::to_string(i) + "_min", 32});
-                args.push_back({arg.name + "_dim_" + std::to_string(i) + "_extent", 32});
-                args.push_back({arg.name + "_dim_" + std::to_string(i) + "_stride", 32});
+                args.push_back({arg.name + "_dim_" + std::to_string(i) + "_min", Int(32)});
+                args.push_back({arg.name + "_dim_" + std::to_string(i) + "_extent", Int(32)});
+                args.push_back({arg.name + "_dim_" + std::to_string(i) + "_stride", Int(32)});
             }
         }
     }
@@ -574,7 +572,7 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder, const 
     for (const auto &arg : kernelArgs) {
         ports.push_back(circt::hw::PortInfo{builder.getStringAttr(arg.name),
                                             circt::hw::PortDirection::OUTPUT,
-                                            builder.getIntegerType(arg.size)});
+                                            builder.getIntegerType(arg.getHWBits())});
     }
 
     // Create ControllerAXI HW module
@@ -922,7 +920,7 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder, const 
     // Create registers storing kernel arguments (scalars and buffer pointers)
     uint32_t argOffset = XRT_KERNEL_ARGS_OFFSET;
     for (const auto &arg : kernelArgs) {
-        mlir::Type type = builder.getIntegerType(arg.size);
+        mlir::Type type = builder.getIntegerType(arg.getHWBits());
         mlir::Value zero = builder.create<circt::hw::ConstantOp>(type, 0);
         mlir::Value argRegNext = builder.create<circt::sv::LogicOp>(type, arg.name + "_next");
         mlir::Value argRegNextRead = builder.create<circt::sv::ReadInOutOp>(argRegNext);
@@ -931,7 +929,7 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder, const 
         // Implement the store logic
         int size = 0;
         uint32_t subArgOffset = argOffset;
-        while (size < arg.size) {
+        while (size < arg.getHWBits()) {
             mlir::Value isWaddrToSubArgAddr = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq, awaddr_reg,
                                                                                   builder.create<circt::hw::ConstantOp>(axiAddrWidthType, subArgOffset));
             builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
@@ -959,8 +957,8 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder, const 
                                                               "rdata_reg");
     hwModuleOutputValues[moduleGetAxiOutputIndex("rdata")] = rdata;
 
-    // 4 registers + number of kernel arguments (each is considered to be have 8 bytes)
-    const size_t numCases = 4 + kernelArgs.size() * 2;
+    // XRT registers + number of kernel arguments (each is considered to be have 8 bytes)
+    const size_t numCases = XRT_KERNEL_ARGS_OFFSET / 4 + kernelArgs.size() * 2;
 
     builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
         builder.create<circt::sv::IfOp>(
@@ -1003,7 +1001,7 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder, const 
                                 break;
                             default:
                                 const KernelArg &arg = kernelArgs[(offset - XRT_KERNEL_ARGS_OFFSET) >> 3];
-                                if ((offset % 8) == 0 || arg.size > 32) {
+                                if ((offset % 8) == 0 || arg.getHWBits() > 32) {
                                     value = builder.create<circt::comb::ExtractOp>(hwModuleOutputValues[moduleGetOutputIndex(arg.name)],
                                                                                    (offset % 8) * 8, 32);
                                 }
@@ -1023,7 +1021,7 @@ void CodeGen_CIRCT::createControlAxi(mlir::ImplicitLocOpBuilder &builder, const 
     outputOp->setOperands(hwModuleOutputValues);
 }
 
-void CodeGen_CIRCT::generateKernelXml(const Internal::LoweredFunc &function) {
+void CodeGen_CIRCT::generateKernelXml(const std::string &kernelName, const FlattenedKernelArgs &kernelArgs) {
     XMLDocument doc;
     doc.InsertFirstChild(doc.NewDeclaration());
 
@@ -1033,9 +1031,9 @@ void CodeGen_CIRCT::generateKernelXml(const Internal::LoweredFunc &function) {
     doc.InsertEndChild(pRoot);
 
     XMLElement *pKernel = doc.NewElement("kernel");
-    pKernel->SetAttribute("name", function.name.c_str());
+    pKernel->SetAttribute("name", kernelName.c_str());
     pKernel->SetAttribute("language", "ip_c");
-    pKernel->SetAttribute("vlnv", std::string("halide-lang.org:kernel:" + function.name + ":1.0").c_str());
+    pKernel->SetAttribute("vlnv", std::string("halide-lang.org:kernel:" + kernelName + ":1.0").c_str());
     pKernel->SetAttribute("attributes", "");
     pKernel->SetAttribute("preferredWorkGroupSizeMultiple", 0);
     pKernel->SetAttribute("workGroupSize", 1);
@@ -1086,6 +1084,8 @@ void CodeGen_CIRCT::generateKernelXml(const Internal::LoweredFunc &function) {
             return std::string("int");
         case Type::UInt:
             return std::string("uint");
+        case Type::Float:
+            return std::string("float");
         }
     };
 
@@ -1097,25 +1097,16 @@ void CodeGen_CIRCT::generateKernelXml(const Internal::LoweredFunc &function) {
     uint64_t bufCnt = 0;
     uint64_t argIdx = 0;
     uint64_t argOffset = XRT_KERNEL_ARGS_OFFSET;
-    for (const auto &arg : function.args) {
-        if (arg.is_scalar() && arg.type.is_int_or_uint()) {
-            pArgs->InsertEndChild(genArg(arg.name, 0, argIdx++, "s_axi_control", arg.type.bytes(),
-                                         argOffset += 8, genTypeStr(arg.type), 0, arg.type.bytes()));
-        } else if (arg.is_buffer()) {
+    for (const auto &arg : kernelArgs) {
+        if (arg.isPointer) {
             pPorts->InsertEndChild(genPort(genAxiPortName(bufCnt), "master", std::numeric_limits<uint64_t>::max(), 512));
-            pArgs->InsertEndChild(genArg(arg.name + "_host", 1, argIdx++, genAxiPortName(bufCnt), 8,
-                                         argOffset += 8, genTypeStr(arg.type) + "*", 0, 8));
-            pArgs->InsertEndChild(genArg(arg.name + "_dimensions", 0, argIdx++, "s_axi_control", 4, argOffset += 8, "int", 0, 4));
-            for (int i = 0; i < arg.dimensions; i++) {
-                pArgs->InsertEndChild(genArg(arg.name + "_dim_" + std::to_string(i) + "_min", 0,
-                                             argIdx++, "s_axi_control", 4, argOffset += 8, "int", 0, 4));
-                pArgs->InsertEndChild(genArg(arg.name + "_dim_" + std::to_string(i) + "_extent", 0,
-                                             argIdx++, "s_axi_control", 4, argOffset += 8, "int", 0, 4));
-                pArgs->InsertEndChild(genArg(arg.name + "_dim_" + std::to_string(i) + "_stride", 0,
-                                             argIdx++, "s_axi_control", 4, argOffset += 8, "int", 0, 4));
-            }
+            pArgs->InsertEndChild(genArg(arg.name, 0, argIdx, genAxiPortName(bufCnt), 8, argOffset, genTypeStr(arg.type) + "*", 0, 8));
             bufCnt++;
+        } else {
+            pArgs->InsertEndChild(genArg(arg.name, 0, argIdx, "s_axi_control", 4, argOffset, genTypeStr(arg.type), 0, arg.type.bytes()));
         }
+        argOffset += 8;
+        argIdx++;
     }
 
     pRoot->InsertEndChild(pPorts);
@@ -1379,7 +1370,7 @@ void CodeGen_CIRCT::Visitor::visit(const Load *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
     debug(1) << "\tName: " << op->name << "\n";
 
-    mlir::Value baseAddr = sym_get(op->name + "_host");
+    mlir::Value baseAddr = sym_get(op->name);
     mlir::Value index = builder.create<mlir::arith::ExtUIOp>(builder.getI64Type(), codegen(op->index));
     mlir::Value elementSize = builder.create<mlir::arith::ConstantOp>(builder.getI64IntegerAttr(op->type.bytes()));
     mlir::Value offset = builder.create<mlir::arith::MulIOp>(index, elementSize);
@@ -1409,7 +1400,7 @@ void CodeGen_CIRCT::Visitor::visit(const Call *op) {
     if (op->name == Call::buffer_get_host) {
         auto name = op->args[0].as<Variable>()->name;
         name = name.substr(0, name.find(".buffer"));
-        value = sym_get(name + "_host");
+        value = sym_get(name);
     } else if (op->name == Call::buffer_get_min) {
         auto name = op->args[0].as<Variable>()->name;
         name = name.substr(0, name.find(".buffer"));
@@ -1501,7 +1492,7 @@ void CodeGen_CIRCT::Visitor::visit(const Store *op) {
     debug(1) << __PRETTY_FUNCTION__ << "\n";
     debug(1) << "\tName: " << op->name << "\n";
 
-    mlir::Value baseAddr = sym_get(op->name + "_host");
+    mlir::Value baseAddr = sym_get(op->name);
     mlir::Value index = builder.create<mlir::arith::ExtUIOp>(builder.getI64Type(), codegen(op->index));
     mlir::Value elementSize = builder.create<mlir::arith::ConstantOp>(builder.getI64IntegerAttr(op->value.type().bytes()));
     mlir::Value offset = builder.create<mlir::arith::MulIOp>(index, elementSize);

@@ -23,7 +23,12 @@ class CodeGen_CIRCT {
 public:
     struct KernelArg {
         std::string name;
-        int size;
+        Type type;
+        bool isPointer = false;
+
+        int getHWBits() const {
+            return isPointer ? 64 : type.bits();
+        }
     };
     using FlattenedKernelArgs = std::vector<KernelArg>;
 
@@ -36,7 +41,7 @@ public:
     static void flattenKernelArguments(const std::vector<LoweredArgument> &inArgs, FlattenedKernelArgs &args);
     void createCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder);
     void createControlAxi(mlir::ImplicitLocOpBuilder &builder, const FlattenedKernelArgs &kernelArgs);
-    static void generateKernelXml(const Internal::LoweredFunc &function);
+    static void generateKernelXml(const std::string &kernelName, const FlattenedKernelArgs &kernelArgs);
 
 protected:
     class Visitor : public IRVisitor {
