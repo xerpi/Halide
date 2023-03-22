@@ -1026,23 +1026,15 @@ void CodeGen_CIRCT::generateToplevel(mlir::ImplicitLocOpBuilder &builder, const 
         return moduleGetInputValue(toFullAxiLiteSlaveSignalName(name));
     };
 
-    auto moduleGetOutputIndex = [&](const std::string &name) {
+    auto moduleGetOutputIndex = [](auto &mod, const std::string &name) {
         unsigned int i;
-        const auto &names = hwModuleOp.getResultNames();
-        for (i = 0; i < hwModuleOp.getNumResults(); i++) {
-            if (names[i].cast<mlir::StringAttr>().str() == name)
+        const auto &names = mod.getResultNames();
+        for (i = 0; i < mod.getNumResults(); i++) {
+            if (names[i].template cast<mlir::StringAttr>().str() == name)
                 break;
         }
-        assert(i < hwModuleOp.getNumResults());
+        assert(i < mod.getNumResults());
         return i;
-    };
-
-    auto moduleGetOutput = [&](const std::string &name) {
-        return hwModuleOutputValues[moduleGetOutputIndex(name)];
-    };
-
-    auto moduleGetAxi4LiteOutputIndex = [&](const std::string &name) {
-        return moduleGetOutputIndex(toFullAxiLiteSlaveSignalName(name));
     };
 
     // Create reset signal from ap_rst_n
@@ -1101,21 +1093,10 @@ void CodeGen_CIRCT::generateToplevel(mlir::ImplicitLocOpBuilder &builder, const 
                                               /*parameters=*/builder.getArrayAttr({}),
                                               /*sym_name=*/builder.getStringAttr("control_axi"));
 
-    auto controlAxiInstanceGetOutputIndex = [&](const std::string &name) {
-        unsigned int i;
-        const auto &names = controlAxiInstance.getResultNames();
-        for (i = 0; i < controlAxiInstance.getNumResults(); i++) {
-            if (names[i].cast<mlir::StringAttr>().str() == name)
-                break;
-        }
-        assert(i < controlAxiInstance.getNumResults());
-        return i;
-    };
-
     for (const auto &signal : axi4LiteSignals) {
         if (signal.direction == circt::hw::PortDirection::OUTPUT) {
-            int i = moduleGetOutputIndex(signal.name.str());
-            int j = controlAxiInstanceGetOutputIndex(signal.name.str());
+            int i = moduleGetOutputIndex(hwModuleOp, signal.name.str());
+            int j = moduleGetOutputIndex(controlAxiInstance, signal.name.str());
             builder.create<circt::sv::AssignOp>(hwModuleOutputWires[i], controlAxiInstance.getResult(j));
         }
     }
