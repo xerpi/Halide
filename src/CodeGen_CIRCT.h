@@ -11,6 +11,8 @@
 #include <mlir/IR/ImplicitLocOpBuilder.h>
 #include <mlir/IR/MLIRContext.h>
 
+#include <circt/Dialect/HW/HWOps.h>
+
 #include "IRVisitor.h"
 #include "Module.h"
 #include "Scope.h"
@@ -34,6 +36,9 @@ public:
 
     // XRT-Managed Kernels Control Requirements
     static constexpr uint64_t XRT_KERNEL_ARGS_OFFSET = 0x10;
+    // See https://docs.xilinx.com/r/en-US/ug1393-vitis-application-acceleration/Control-Requirements-for-XRT-Managed-Kernels
+    static constexpr int S_AXI_ADDR_WIDTH = 32;
+    static constexpr int S_AXI_DATA_WIDTH = 32;
 
     CodeGen_CIRCT();
 
@@ -41,7 +46,14 @@ public:
     static void flattenKernelArguments(const std::vector<LoweredArgument> &inArgs, FlattenedKernelArgs &args);
     void createCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder);
     void createControlAxi(mlir::ImplicitLocOpBuilder &builder, const FlattenedKernelArgs &kernelArgs);
+    void generateToplevel(mlir::ImplicitLocOpBuilder &builder, const std::string &kernelName, const FlattenedKernelArgs &kernelArgs);
     static void generateKernelXml(const std::string &kernelName, const FlattenedKernelArgs &kernelArgs);
+
+    void portsAddAXI4LiteSignals(mlir::ImplicitLocOpBuilder &builder, int addrWidth, int dataWidth, mlir::SmallVector<circt::hw::PortInfo> &ports);
+
+    std::string toFullAxiLiteSlaveSignalName(const std::string &name) {
+        return "s_axi_" + name;
+    };
 
 protected:
     class Visitor : public IRVisitor {
