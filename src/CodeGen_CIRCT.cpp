@@ -1249,13 +1249,13 @@ void CodeGen_CIRCT::generateKernelXml(llvm::raw_ostream &os, const std::string &
     doc.InsertEndChild(pRoot);
 
     XMLElement *pKernel = doc.NewElement("kernel");
-    pKernel->SetAttribute("name", kernelName.c_str());
+    pKernel->SetAttribute("name", "toplevel");
     pKernel->SetAttribute("language", "ip_c");
-    pKernel->SetAttribute("vlnv", std::string("halide-lang.org:kernel:" + kernelName + ":1.0").c_str());
+    pKernel->SetAttribute("vlnv", std::string("halide-lang.org:" + kernelName + ":toplevel:1.0").c_str());
     pKernel->SetAttribute("attributes", "");
     pKernel->SetAttribute("preferredWorkGroupSizeMultiple", 0);
     pKernel->SetAttribute("workGroupSize", 1);
-    pKernel->SetAttribute("interrupt", 1);
+    pKernel->SetAttribute("interrupt", "false");
     pKernel->SetAttribute("hwControlProtocol", "ap_ctrl_hs");
     pRoot->InsertEndChild(pKernel);
 
@@ -1306,25 +1306,25 @@ void CodeGen_CIRCT::generateKernelXml(llvm::raw_ostream &os, const std::string &
     XMLElement *pPorts = doc.NewElement("ports");
     XMLElement *pArgs = doc.NewElement("args");
 
-    pPorts->InsertEndChild(genPort("s_axi_control", "slave", 0x1000, 32));
+    pPorts->InsertEndChild(genPort(AXI_CONTROL_PREFIX, "slave", 0x1000, 32));
 
     uint64_t bufCnt = 0;
     uint64_t argIdx = 0;
     uint64_t argOffset = XRT_KERNEL_ARGS_OFFSET;
     for (const auto &arg : kernelArgs) {
         if (arg.isPointer) {
-            pPorts->InsertEndChild(genPort(getAxiManagerSignalNamePrefixId(bufCnt), "master", std::numeric_limits<uint64_t>::max(), 512));
-            pArgs->InsertEndChild(genArg(arg.name, 0, argIdx, getAxiManagerSignalNamePrefixId(bufCnt), 8, argOffset, genTypeStr(arg.type) + "*", 0, 8));
+            pPorts->InsertEndChild(genPort(getAxiManagerSignalNamePrefixId(bufCnt), "master", std::numeric_limits<uint64_t>::max(), M_AXI_DATA_WIDTH));
+            pArgs->InsertEndChild(genArg(arg.name, 1, argIdx, getAxiManagerSignalNamePrefixId(bufCnt), 8, argOffset, genTypeStr(arg.type) + "*", 0, 8));
             bufCnt++;
         } else {
-            pArgs->InsertEndChild(genArg(arg.name, 0, argIdx, "s_axi_control", 4, argOffset, genTypeStr(arg.type), 0, arg.type.bytes()));
+            pArgs->InsertEndChild(genArg(arg.name, 0, argIdx, AXI_CONTROL_PREFIX, 4, argOffset, genTypeStr(arg.type), 0, arg.type.bytes()));
         }
         argOffset += 8;
         argIdx++;
     }
 
-    pRoot->InsertEndChild(pPorts);
-    pRoot->InsertEndChild(pArgs);
+    pKernel->InsertEndChild(pPorts);
+    pKernel->InsertEndChild(pArgs);
 
     XMLPrinter printer;
     doc.Print(&printer);
