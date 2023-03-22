@@ -3,6 +3,8 @@
 
 #include <tinyxml2.h>
 
+#include <llvm/Support/ToolOutputFile.h>
+
 #include <mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h>
 #include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/Dialect/ControlFlow/IR/ControlFlow.h>
@@ -13,6 +15,7 @@
 #include <mlir/IR/Verifier.h>
 #include <mlir/Pass/Pass.h>
 #include <mlir/Pass/PassManager.h>
+#include <mlir/Support/FileUtilities.h>
 #include <mlir/Transforms/Passes.h>
 
 #include <circt/Conversion/CalyxToFSM.h>
@@ -116,8 +119,6 @@ void CodeGen_CIRCT::compile(const Module &module) {
 
     builder.create<mlir::func::ReturnOp>();
 
-    generateKernelXml(function.name, flattenedKernelArgs);
-
     // Print MLIR before running passes
     std::cout << "Original MLIR" << std::endl;
     mlir_module.dump();
@@ -209,9 +210,19 @@ void CodeGen_CIRCT::compile(const Module &module) {
 
     // Emit Verilog
     if (pmFSMtoSVRunResult.succeeded()) {
+        std::string dirName = "generated_" + module.name();
         std::cout << "Exporting Verilog." << std::endl;
-        auto exportVerilogResult = circt::exportSplitVerilog(mlir_module, "generated_" + module.name());
+        auto exportVerilogResult = circt::exportSplitVerilog(mlir_module, dirName);
         std::cout << "Export Verilog result: " << exportVerilogResult.succeeded() << std::endl;
+
+        std::cout << "Generating kernel.xml" << std::endl;
+
+        // Open the output file.
+        auto output = mlir::openOutputFile(dirName + "/kernel.xml");
+        if (output) {
+            generateKernelXml(output->os(), function.name, flattenedKernelArgs);
+            output->keep();
+        }
     }
 
     std::cout << "Done!" << std::endl;
@@ -1228,7 +1239,7 @@ void CodeGen_CIRCT::generateToplevel(mlir::ImplicitLocOpBuilder &builder, const 
     outputOp->setOperands(hwModuleOutputValues);
 }
 
-void CodeGen_CIRCT::generateKernelXml(const std::string &kernelName, const FlattenedKernelArgs &kernelArgs) {
+void CodeGen_CIRCT::generateKernelXml(llvm::raw_ostream &os, const std::string &kernelName, const FlattenedKernelArgs &kernelArgs) {
     XMLDocument doc;
     doc.InsertFirstChild(doc.NewDeclaration());
 
@@ -1317,7 +1328,7 @@ void CodeGen_CIRCT::generateKernelXml(const std::string &kernelName, const Flatt
 
     XMLPrinter printer;
     doc.Print(&printer);
-    std::cout << printer.CStr() << std::endl;
+    os << printer.CStr();
 }
 
 void CodeGen_CIRCT::portsAddAXI4ManagerSignalsPrefix(mlir::ImplicitLocOpBuilder &builder, const std::string &prefix,
