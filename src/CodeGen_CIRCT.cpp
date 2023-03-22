@@ -91,6 +91,13 @@ void CodeGen_CIRCT::compile(const Module &module) {
     flattenKernelArguments(function.args, flattenedKernelArgs);
 
     for (const auto &arg : flattenedKernelArgs) {
+        inputs.push_back(builder.getIntegerType(arg.getHWBits()));
+        inputNames.push_back(arg.name);
+        argAttrs.push_back(builder.getDictionaryAttr(
+            builder.getNamedAttr(circt::scfToCalyx::sPortNameAttr, builder.getStringAttr(arg.name))));
+    }
+
+    for (const auto &arg : flattenedKernelArgs) {
         if (arg.isPointer) {
             // Add memref to the arguments. Treat buffers as 1D
             inputs.push_back(mlir::MemRefType::get({0}, builder.getIntegerType(arg.type.bits())));
@@ -98,11 +105,6 @@ void CodeGen_CIRCT::compile(const Module &module) {
             argAttrs.push_back(builder.getDictionaryAttr(
                 builder.getNamedAttr(circt::scfToCalyx::sSequentialReads, builder.getBoolAttr(true))));
         }
-
-        inputs.push_back(builder.getIntegerType(arg.getHWBits()));
-        inputNames.push_back(arg.name);
-        argAttrs.push_back(builder.getDictionaryAttr(
-            builder.getNamedAttr(circt::scfToCalyx::sPortNameAttr, builder.getStringAttr(arg.name))));
     }
 
     mlir::FunctionType functionType = builder.getFunctionType(inputs, results);
@@ -174,8 +176,8 @@ void CodeGen_CIRCT::compile(const Module &module) {
 
     // Create Calyx external memory to AXI interface
     builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
-    generateCalyxExtMemToAXI(builder);
-    std::cout << "[Adding CalyxExtMemToAXI] MLIR:" << std::endl;
+    generateCalyxExtMemToAxi(builder);
+    std::cout << "[Adding CalyxExtMemToAxi] MLIR:" << std::endl;
     mlir_module.dump();
 
     // Add AXI control
@@ -255,11 +257,11 @@ void CodeGen_CIRCT::flattenKernelArguments(const std::vector<LoweredArgument> &i
     }
 }
 
-void CodeGen_CIRCT::generateCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder) {
+void CodeGen_CIRCT::generateCalyxExtMemToAxi(mlir::ImplicitLocOpBuilder &builder) {
     // AXI4 Manager signals
     // araddr, awaddr, wdata and rdata are connected directly outside the FSM module
     mlir::SmallVector<circt::hw::PortInfo> axiSignals;
-    portsAddAXI4ManagerSignals(builder, M_AXI_ADDR_WIDTH, M_AXI_DATA_WIDTH, axiSignals);
+    portsAddAXI4ManagerSignalsPrefix(builder, AXI_MANAGER_PREFIX, M_AXI_ADDR_WIDTH, M_AXI_DATA_WIDTH, axiSignals);
 
     mlir::SmallVector<mlir::Type> inputs, outputs;
     mlir::SmallVector<mlir::Attribute> inputNames, outputNames;
@@ -276,10 +278,10 @@ void CodeGen_CIRCT::generateCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder
     }
 
     // Then add Calyx external memory interface signals
-    size_t calyxReadEnSignalIndex = inputs.size();
+    size_t CalyxExtMemToAxiReadEnSignalIndex = inputs.size();
     inputs.push_back(builder.getI1Type());
     inputNames.push_back(builder.getStringAttr("calyx_read_en"));
-    size_t calyxWriteEnSignalIndex = inputs.size();
+    size_t CalyxExtMemToAxiWriteEnSignalIndex = inputs.size();
     inputs.push_back(builder.getI1Type());
     inputNames.push_back(builder.getStringAttr("calyx_write_en"));
     size_t calyxDoneSignalIndex = outputs.size();
@@ -287,7 +289,7 @@ void CodeGen_CIRCT::generateCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder
     outputNames.push_back(builder.getStringAttr("calyx_done"));
 
     mlir::FunctionType fsmFunctionType = builder.getFunctionType(inputs, outputs);
-    circt::fsm::MachineOp machineOp = builder.create<circt::fsm::MachineOp>("CalyxExtMemToAXI", "IDLE", fsmFunctionType);
+    circt::fsm::MachineOp machineOp = builder.create<circt::fsm::MachineOp>("CalyxExtMemToAxi", "IDLE", fsmFunctionType);
     machineOp.setArgNamesAttr(builder.getArrayAttr(inputNames));
     machineOp.setResNamesAttr(builder.getArrayAttr(outputNames));
 
@@ -354,14 +356,14 @@ void CodeGen_CIRCT::generateCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder
                 circt::fsm::TransitionOp transition = transitionsBuilder.create<circt::fsm::TransitionOp>("AW_HANDSHAKE");
                 transition.ensureGuard(transitionsBuilder);
                 circt::fsm::ReturnOp returnOp = transition.getGuardReturn();
-                returnOp.setOperand(machineOp.getArgument(calyxWriteEnSignalIndex));
+                returnOp.setOperand(machineOp.getArgument(CalyxExtMemToAxiWriteEnSignalIndex));
             }
 
             {
                 circt::fsm::TransitionOp transition = transitionsBuilder.create<circt::fsm::TransitionOp>("AR_HANDSHAKE");
                 transition.ensureGuard(transitionsBuilder);
                 circt::fsm::ReturnOp returnOp = transition.getGuardReturn();
-                returnOp.setOperand(machineOp.getArgument(calyxReadEnSignalIndex));
+                returnOp.setOperand(machineOp.getArgument(CalyxExtMemToAxiReadEnSignalIndex));
             }
         }
     }
@@ -962,9 +964,35 @@ void CodeGen_CIRCT::generateToplevel(mlir::ImplicitLocOpBuilder &builder, const 
     ports.push_back(circt::hw::PortInfo{builder.getStringAttr("ap_rst_n"), circt::hw::PortDirection::INPUT, builder.getI1Type()});
 
     // AXI4 lite subordinate control signals
-    mlir::SmallVector<circt::hw::PortInfo> axi4LiteSignals;
-    portsAddAXI4LiteSubordinateSignals(builder, S_AXI_ADDR_WIDTH, S_AXI_DATA_WIDTH, axi4LiteSignals);
-    ports.append(axi4LiteSignals);
+    mlir::SmallVector<circt::hw::PortInfo> axi4LiteSubordinateSignals;
+    portsAddAXI4LiteSubordinateSignals(builder, S_AXI_ADDR_WIDTH, S_AXI_DATA_WIDTH, axi4LiteSubordinateSignals);
+    ports.append(axi4LiteSubordinateSignals);
+
+    // AXI4 lite subordinate control signals
+    mlir::SmallVector<mlir::SmallVector<circt::hw::PortInfo>> axi4ManagerSignals;
+
+    // Signals for CalyxExtMemToAxi for each kernel buffer argument
+    unsigned numBufferArgs = 0;
+    for (unsigned i = 0; i < kernelArgs.size(); i++) {
+        if (kernelArgs[i].isPointer) {
+            mlir::SmallVector<circt::hw::PortInfo> signals;
+            portsAddAXI4ManagerSignalsPrefix(builder, getAxiManagerSignalNamePrefixId(numBufferArgs) + "_",
+                                             M_AXI_ADDR_WIDTH, M_AXI_DATA_WIDTH, signals);
+            axi4ManagerSignals.push_back(signals);
+            ports.append(signals);
+
+            // araddr, awaddr, rdata and wdata
+            ports.push_back(circt::hw::PortInfo{builder.getStringAttr(toFullAxiManagerSignalNameId(numBufferArgs, "araddr")),
+                                                circt::hw::PortDirection::OUTPUT, builder.getIntegerType(M_AXI_ADDR_WIDTH)});
+            ports.push_back(circt::hw::PortInfo{builder.getStringAttr(toFullAxiManagerSignalNameId(numBufferArgs, "awaddr")),
+                                                circt::hw::PortDirection::OUTPUT, builder.getIntegerType(M_AXI_ADDR_WIDTH)});
+            ports.push_back(circt::hw::PortInfo{builder.getStringAttr(toFullAxiManagerSignalNameId(numBufferArgs, "rdata")),
+                                                circt::hw::PortDirection::INPUT, builder.getIntegerType(M_AXI_DATA_WIDTH)});
+            ports.push_back(circt::hw::PortInfo{builder.getStringAttr(toFullAxiManagerSignalNameId(numBufferArgs, "wdata")),
+                                                circt::hw::PortDirection::OUTPUT, builder.getIntegerType(M_AXI_DATA_WIDTH)});
+            numBufferArgs++;
+        }
+    }
 
     // Create toplevel HW module
     circt::hw::HWModuleOp hwModuleOp = builder.create<circt::hw::HWModuleOp>(builder.getStringAttr("toplevel"), ports);
@@ -990,10 +1018,6 @@ void CodeGen_CIRCT::generateToplevel(mlir::ImplicitLocOpBuilder &builder, const 
         assert(0);
     };
 
-    auto moduleGetAxi4LiteInputValue = [&](const std::string &name) {
-        return moduleGetInputValue(toFullAxiSubordinateSignalName(name));
-    };
-
     auto moduleGetOutputIndex = [](auto &mod, const std::string &name) {
         unsigned int i;
         const auto &names = mod.getResultNames();
@@ -1012,9 +1036,8 @@ void CodeGen_CIRCT::generateToplevel(mlir::ImplicitLocOpBuilder &builder, const 
 
     mlir::Value apDone = builder.create<circt::sv::WireOp>(builder.getI1Type(), "ap_done");
     mlir::Value apDoneRead = builder.create<circt::sv::ReadInOutOp>(apDone);
-    circt::sv::WireOp apStart = builder.create<circt::sv::WireOp>(builder.getI1Type(), "ap_start");
-    mlir::Value apStartRead = builder.create<circt::sv::ReadInOutOp>(apStart);
 
+    // Control AXI-slave subordinate
     mlir::SmallVector<mlir::Value> controlAxiInputs;
     mlir::SmallVector<mlir::Type> controlAxiResultTypes;
     mlir::SmallVector<mlir::Attribute> controlAxiArgNames, controlAxiResultNames;
@@ -1026,16 +1049,77 @@ void CodeGen_CIRCT::generateToplevel(mlir::ImplicitLocOpBuilder &builder, const 
     controlAxiInputs.push_back(apDoneRead);
     controlAxiArgNames.push_back(builder.getStringAttr("ap_done"));
 
-    controlAxiResultTypes.push_back(apStartRead.getType());
-    controlAxiResultNames.push_back(apStart.getNameAttr());
+    controlAxiResultTypes.push_back(builder.getI1Type());
+    controlAxiResultNames.push_back(builder.getStringAttr("ap_start"));
 
-    for (const auto &signal : axi4LiteSignals) {
+    for (const auto &signal : axi4LiteSubordinateSignals) {
         if (signal.direction == circt::hw::PortDirection::INPUT) {
             controlAxiInputs.push_back(moduleGetInputValue(signal.name.str()));
             controlAxiArgNames.push_back(signal.name);
         } else {
             controlAxiResultTypes.push_back(signal.type);
             controlAxiResultNames.push_back(signal.name);
+        }
+    }
+
+    // Instance a CalyxExtMemToAxi for each kernel buffer argument
+    mlir::SmallVector<circt::hw::InstanceOp> CalyxExtMemToAxiInstances(numBufferArgs);
+    mlir::SmallVector<circt::sv::WireOp> CalyxExtMemToAxiReadEnWires(numBufferArgs);
+    mlir::SmallVector<circt::sv::WireOp> CalyxExtMemToAxiWriteEnWires(numBufferArgs);
+    mlir::SmallVector<mlir::Value> CalyxExtMemToAxiReadEnWiresRead(numBufferArgs);
+    mlir::SmallVector<mlir::Value> CalyxExtMemToAxiWriteEnWiresRead(numBufferArgs);
+
+    for (unsigned i = 0; i < numBufferArgs; i++) {
+        mlir::SmallVector<mlir::Value> CalyxExtMemToAxiInputs;
+        mlir::SmallVector<mlir::Type> CalyxExtMemToAxiResultTypes;
+        mlir::SmallVector<mlir::Attribute> CalyxExtMemToAxiArgNames, CalyxExtMemToAxiResultNames;
+
+        CalyxExtMemToAxiReadEnWires[i] = builder.create<circt::sv::WireOp>(builder.getI1Type(), "calyx_read_en_" + std::to_string(i));
+        CalyxExtMemToAxiReadEnWiresRead[i] = builder.create<circt::sv::ReadInOutOp>(CalyxExtMemToAxiReadEnWires[i]);
+        CalyxExtMemToAxiWriteEnWires[i] = builder.create<circt::sv::WireOp>(builder.getI1Type(), "calyx_write_en_" + std::to_string(i));
+        CalyxExtMemToAxiWriteEnWiresRead[i] = builder.create<circt::sv::ReadInOutOp>(CalyxExtMemToAxiWriteEnWires[i]);
+
+        for (const auto &signal : axi4ManagerSignals[i]) {
+            std::string basename = fullAxiSignalNameIdGetBasename(signal.name.str());
+            mlir::StringAttr nameAttr = builder.getStringAttr(toFullAxiManagerSignalName(basename));
+            if (signal.direction == circt::hw::PortDirection::INPUT) {
+                CalyxExtMemToAxiInputs.push_back(moduleGetInputValue(signal.name.str()));
+                CalyxExtMemToAxiArgNames.push_back(nameAttr);
+            } else {
+                CalyxExtMemToAxiResultTypes.push_back(signal.type);
+                CalyxExtMemToAxiResultNames.push_back(nameAttr);
+            }
+        }
+
+        CalyxExtMemToAxiInputs.push_back(CalyxExtMemToAxiReadEnWiresRead[i]);
+        CalyxExtMemToAxiArgNames.push_back(builder.getStringAttr("calyx_read_en"));
+        CalyxExtMemToAxiInputs.push_back(CalyxExtMemToAxiWriteEnWiresRead[i]);
+        CalyxExtMemToAxiArgNames.push_back(builder.getStringAttr("calyx_write_en"));
+        CalyxExtMemToAxiInputs.push_back(clock);
+        CalyxExtMemToAxiArgNames.push_back(builder.getStringAttr("clk"));
+        CalyxExtMemToAxiInputs.push_back(reset);
+        CalyxExtMemToAxiArgNames.push_back(builder.getStringAttr("rst"));
+
+        CalyxExtMemToAxiResultTypes.push_back(builder.getI1Type());
+        CalyxExtMemToAxiResultNames.push_back(builder.getStringAttr("calyx_done"));
+
+        mlir::StringAttr nameAttr = builder.getStringAttr("calyx_ext_mem_to_axi_" + std::to_string(i));
+        CalyxExtMemToAxiInstances[i] =
+            builder.create<circt::hw::InstanceOp>(CalyxExtMemToAxiResultTypes,
+                                                  nameAttr, "CalyxExtMemToAxi",
+                                                  CalyxExtMemToAxiInputs,
+                                                  builder.getArrayAttr(CalyxExtMemToAxiArgNames),
+                                                  builder.getArrayAttr(CalyxExtMemToAxiResultNames),
+                                                  /*parameters=*/builder.getArrayAttr({}),
+                                                  /*sym_name=*/nameAttr);
+
+        for (const auto &signal : axi4ManagerSignals[i]) {
+            if (signal.direction == circt::hw::PortDirection::OUTPUT) {
+                std::string basename = fullAxiSignalNameIdGetBasename(signal.name.str());
+                int hwModIdx = moduleGetOutputIndex(hwModuleOp, signal.name.str());
+                int memIdx = moduleGetOutputIndex(CalyxExtMemToAxiInstances[i], toFullAxiManagerSignalName(basename));
+                builder.create<circt::sv::AssignOp>(hwModuleOutputWires[hwModIdx], CalyxExtMemToAxiInstances[i].getResult(memIdx));
+            }
         }
     }
 
@@ -1062,13 +1146,82 @@ void CodeGen_CIRCT::generateToplevel(mlir::ImplicitLocOpBuilder &builder, const 
                                               /*parameters=*/builder.getArrayAttr({}),
                                               /*sym_name=*/builder.getStringAttr("control_axi"));
 
-    for (const auto &signal : axi4LiteSignals) {
+    for (const auto &signal : axi4LiteSubordinateSignals) {
         if (signal.direction == circt::hw::PortDirection::OUTPUT) {
             int i = moduleGetOutputIndex(hwModuleOp, signal.name.str());
             int j = moduleGetOutputIndex(controlAxiInstance, signal.name.str());
             builder.create<circt::sv::AssignOp>(hwModuleOutputWires[i], controlAxiInstance.getResult(j));
         }
     }
+
+    // Kernel instance
+    mlir::SmallVector<mlir::Value> kernelInputs;
+    mlir::SmallVector<mlir::Type> kernelResultTypes;
+    mlir::SmallVector<mlir::Attribute> kernelArgNames, kernelResultNames;
+
+    for (const auto &arg : kernelArgs) {
+        int idx = moduleGetOutputIndex(controlAxiInstance, arg.name);
+        kernelInputs.push_back(controlAxiInstance.getResult(idx));
+        kernelArgNames.push_back(builder.getStringAttr(arg.name));
+    }
+
+    for (unsigned i = 0; i < numBufferArgs; i++) {
+        kernelInputs.push_back(moduleGetInputValue(toFullAxiManagerSignalNameId(i, "rdata")));
+        kernelArgNames.push_back(builder.getStringAttr("ext_mem" + std::to_string(i) + "_read_data"));
+        kernelInputs.push_back(CalyxExtMemToAxiInstances[i].getResult(
+            moduleGetOutputIndex(CalyxExtMemToAxiInstances[i], "calyx_done")));
+        kernelArgNames.push_back(builder.getStringAttr("ext_mem" + std::to_string(i) + "_done"));
+
+        kernelResultTypes.push_back(builder.getIntegerType(M_AXI_DATA_WIDTH));
+        kernelResultNames.push_back(builder.getStringAttr("ext_mem" + std::to_string(i) + "_write_data"));
+        kernelResultTypes.push_back(builder.getIntegerType(M_AXI_ADDR_WIDTH));
+        kernelResultNames.push_back(builder.getStringAttr("ext_mem" + std::to_string(i) + "_addr0"));
+        kernelResultTypes.push_back(builder.getI1Type());
+        kernelResultNames.push_back(builder.getStringAttr("ext_mem" + std::to_string(i) + "_write_en"));
+        kernelResultTypes.push_back(builder.getI1Type());
+        kernelResultNames.push_back(builder.getStringAttr("ext_mem" + std::to_string(i) + "_read_en"));
+    }
+
+    kernelInputs.push_back(clock);
+    kernelArgNames.push_back(builder.getStringAttr("clk"));
+    kernelInputs.push_back(reset);
+    kernelArgNames.push_back(builder.getStringAttr("reset"));
+    kernelInputs.push_back(controlAxiInstance.getResult(moduleGetOutputIndex(controlAxiInstance, "ap_start")));
+    kernelArgNames.push_back(builder.getStringAttr("go"));
+
+    kernelResultTypes.push_back(builder.getI1Type());
+    kernelResultNames.push_back(builder.getStringAttr("done"));
+
+    circt::hw::InstanceOp kernelInstance =
+        builder.create<circt::hw::InstanceOp>(kernelResultTypes,
+                                              builder.getStringAttr("kernel"), kernelName,
+                                              kernelInputs,
+                                              builder.getArrayAttr(kernelArgNames),
+                                              builder.getArrayAttr(kernelResultNames),
+                                              /*parameters=*/builder.getArrayAttr({}),
+                                              /*sym_name=*/builder.getStringAttr("kernel"));
+
+    for (unsigned i = 0; i < numBufferArgs; i++) {
+        int idxIn, idxOut;
+        idxIn = moduleGetOutputIndex(kernelInstance, "ext_mem" + std::to_string(i) + "_addr0");
+        idxOut = moduleGetOutputIndex(hwModuleOp, toFullAxiManagerSignalNameId(i, "awaddr"));
+        builder.create<circt::sv::AssignOp>(hwModuleOutputWires[idxOut], kernelInstance.getResult(idxIn));
+        idxOut = moduleGetOutputIndex(hwModuleOp, toFullAxiManagerSignalNameId(i, "araddr"));
+        builder.create<circt::sv::AssignOp>(hwModuleOutputWires[idxOut], kernelInstance.getResult(idxIn));
+
+        idxIn = moduleGetOutputIndex(kernelInstance, "ext_mem" + std::to_string(i) + "_write_data");
+        idxOut = moduleGetOutputIndex(hwModuleOp, toFullAxiManagerSignalNameId(i, "wdata"));
+        builder.create<circt::sv::AssignOp>(hwModuleOutputWires[idxOut], kernelInstance.getResult(idxIn));
+
+        idxIn = moduleGetOutputIndex(kernelInstance, "ext_mem" + std::to_string(i) + "_read_en");
+        builder.create<circt::sv::AssignOp>(CalyxExtMemToAxiReadEnWires[i], kernelInstance.getResult(idxIn));
+
+        idxIn = moduleGetOutputIndex(kernelInstance, "ext_mem" + std::to_string(i) + "_write_en");
+        builder.create<circt::sv::AssignOp>(CalyxExtMemToAxiWriteEnWires[i], kernelInstance.getResult(idxIn));
+    }
+
+    builder.create<circt::sv::AssignOp>(apDone,
+                                        kernelInstance.getResult(moduleGetOutputIndex(kernelInstance, "done")));
 
     // Set module output operands
     auto outputOp = hwModuleOp.getBodyBlock()->getTerminator();
@@ -1112,10 +1265,6 @@ void CodeGen_CIRCT::generateKernelXml(const std::string &kernelName, const Flatt
         return pPort;
     };
 
-    auto genAxiPortName = [](int id) {
-        return "m" + std::string(id < 10 ? "0" : "") + std::to_string(id) + "_axi";
-    };
-
     auto genArg = [&](std::string name, int addressQualifier, int id, std::string port, uint64_t size, uint64_t offset,
                       std::string type, uint64_t hostOffset, uint64_t hostSize) {
         XMLElement *pArg = doc.NewElement("arg");
@@ -1153,8 +1302,8 @@ void CodeGen_CIRCT::generateKernelXml(const std::string &kernelName, const Flatt
     uint64_t argOffset = XRT_KERNEL_ARGS_OFFSET;
     for (const auto &arg : kernelArgs) {
         if (arg.isPointer) {
-            pPorts->InsertEndChild(genPort(genAxiPortName(bufCnt), "master", std::numeric_limits<uint64_t>::max(), 512));
-            pArgs->InsertEndChild(genArg(arg.name, 0, argIdx, genAxiPortName(bufCnt), 8, argOffset, genTypeStr(arg.type) + "*", 0, 8));
+            pPorts->InsertEndChild(genPort(getAxiManagerSignalNamePrefixId(bufCnt), "master", std::numeric_limits<uint64_t>::max(), 512));
+            pArgs->InsertEndChild(genArg(arg.name, 0, argIdx, getAxiManagerSignalNamePrefixId(bufCnt), 8, argOffset, genTypeStr(arg.type) + "*", 0, 8));
             bufCnt++;
         } else {
             pArgs->InsertEndChild(genArg(arg.name, 0, argIdx, "s_axi_control", 4, argOffset, genTypeStr(arg.type), 0, arg.type.bytes()));
@@ -1171,7 +1320,9 @@ void CodeGen_CIRCT::generateKernelXml(const std::string &kernelName, const Flatt
     std::cout << printer.CStr() << std::endl;
 }
 
-void CodeGen_CIRCT::portsAddAXI4ManagerSignals(mlir::ImplicitLocOpBuilder &builder, int addrWidth, int dataWidth, mlir::SmallVector<circt::hw::PortInfo> &ports) {
+void CodeGen_CIRCT::portsAddAXI4ManagerSignalsPrefix(mlir::ImplicitLocOpBuilder &builder, const std::string &prefix,
+                                                     int addrWidth, int dataWidth,
+                                                     mlir::SmallVector<circt::hw::PortInfo> &ports) {
     struct SignalInfo {
         std::string name;
         int size;
@@ -1202,7 +1353,7 @@ void CodeGen_CIRCT::portsAddAXI4ManagerSignals(mlir::ImplicitLocOpBuilder &build
     };
 
     for (const auto &signal : signals) {
-        ports.push_back(circt::hw::PortInfo{builder.getStringAttr(toFullAxiManagerSignalName(signal.name)),
+        ports.push_back(circt::hw::PortInfo{builder.getStringAttr(prefix + signal.name),
                                             signal.input ? circt::hw::PortDirection::INPUT : circt::hw::PortDirection::OUTPUT,
                                             builder.getIntegerType(signal.size)});
     }

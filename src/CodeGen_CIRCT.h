@@ -114,24 +114,40 @@ private:
     static constexpr int S_AXI_ADDR_WIDTH = 32;
     static constexpr int S_AXI_DATA_WIDTH = 32;
 
+    static constexpr char AXI_MANAGER_PREFIX[] = "m_axi_";
+
     static void flattenKernelArguments(const std::vector<LoweredArgument> &inArgs, FlattenedKernelArgs &args);
 
     static void generateKernelXml(const std::string &kernelName, const FlattenedKernelArgs &kernelArgs);
-    static void generateCalyxExtMemToAXI(mlir::ImplicitLocOpBuilder &builder);
+    static void generateCalyxExtMemToAxi(mlir::ImplicitLocOpBuilder &builder);
     static void generateControlAxi(mlir::ImplicitLocOpBuilder &builder, const FlattenedKernelArgs &kernelArgs);
     static void generateToplevel(mlir::ImplicitLocOpBuilder &builder, const std::string &kernelName, const FlattenedKernelArgs &kernelArgs);
 
-    static void portsAddAXI4ManagerSignals(mlir::ImplicitLocOpBuilder &builder, int addrWidth, int dataWidth,
-                                           mlir::SmallVector<circt::hw::PortInfo> &ports);
+    static void portsAddAXI4ManagerSignalsPrefix(mlir::ImplicitLocOpBuilder &builder, const std::string &prefix,
+                                                 int addrWidth, int dataWidth,
+                                                 mlir::SmallVector<circt::hw::PortInfo> &ports);
     static void portsAddAXI4LiteSubordinateSignals(mlir::ImplicitLocOpBuilder &builder, int addrWidth, int dataWidth,
                                                    mlir::SmallVector<circt::hw::PortInfo> &ports);
 
+    static std::string getAxiManagerSignalNamePrefixId(int id) {
+        return "m" + std::string(id < 10 ? "0" : "") + std::to_string(id) + "_axi";
+    }
+
     static std::string toFullAxiManagerSignalName(const std::string &name) {
-        return "m_axi_" + name;
+        return std::string(AXI_MANAGER_PREFIX) + name;
+    };
+
+    static std::string toFullAxiManagerSignalNameId(int id, const std::string &name) {
+        return getAxiManagerSignalNamePrefixId(id) + "_" + name;
     };
 
     static std::string toFullAxiSubordinateSignalName(const std::string &name) {
         return "s_axi_" + name;
+    };
+
+    static std::string fullAxiSignalNameIdGetBasename(const std::string &name) {
+        std::string token = "axi_";
+        return name.substr(name.find(token) + token.size());
     };
 
     mlir::MLIRContext mlir_context;
