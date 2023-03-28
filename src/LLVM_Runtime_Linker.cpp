@@ -293,6 +293,8 @@ DECLARE_CPP_INITMOD(riscv_cpu_features)
 DECLARE_NO_INITMOD(riscv_cpu_features)
 #endif  // WITH_RISCV
 
+DECLARE_CPP_INITMOD(xrt)
+
 llvm::DataLayout get_data_layout_for_target(Target target) {
     if (target.arch == Target::X86) {
         if (target.bits == 32) {
@@ -1237,6 +1239,9 @@ std::unique_ptr<llvm::Module> get_initial_module_for_target(Target t, llvm::LLVM
             modules.push_back(get_initmod_hexagon_cache_allocator(c, bits_64, debug));
             modules.push_back(get_initmod_hexagon_dma(c, bits_64, debug));
             modules.push_back(get_initmod_hexagon_dma_pool(c, bits_64, debug));
+        }
+        if (t.has_feature(Target::CIRCT)) {
+            modules.push_back(get_initmod_xrt(c, bits_64, debug));
         }
     }
 

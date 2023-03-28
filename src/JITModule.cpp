@@ -767,6 +767,7 @@ enum RuntimeKind {
     D3D12Compute,
     Vulkan,
     WebGPU,
+    XRT,
     OpenCLDebug,
     MetalDebug,
     CUDADebug,
@@ -775,6 +776,7 @@ enum RuntimeKind {
     D3D12ComputeDebug,
     VulkanDebug,
     WebGPUDebug,
+    XRTDebug,
     MaxRuntimeKind
 };
 
@@ -896,6 +898,15 @@ JITModule &make_module(llvm::Module *for_module, Target target,
             one_gpu.set_feature(Target::WebGPU);
             module_name += "webgpu";
             load_webgpu();
+            break;
+        case XRTDebug:
+            one_gpu.set_feature(Target::Debug);
+            one_gpu.set_feature(Target::CIRCT);
+            module_name = "debug_xrt";
+            break;
+        case XRT:
+            one_gpu.set_feature(Target::CIRCT);
+            module_name += "xrt";
             break;
         default:
             module_name = "shared runtime";
@@ -1099,6 +1110,13 @@ std::vector<JITModule> JITSharedRuntime::get(llvm::Module *for_module, const Tar
     }
     if (target.has_feature(Target::WebGPU)) {
         auto kind = target.has_feature(Target::Debug) ? WebGPUDebug : WebGPU;
+        JITModule m = make_module(for_module, target, kind, result, create);
+        if (m.compiled()) {
+            result.push_back(m);
+        }
+    }
+    if (target.has_feature(Target::CIRCT)) {
+        auto kind = target.has_feature(Target::Debug) ? XRTDebug : XRT;
         JITModule m = make_module(for_module, target, kind, result, create);
         if (m.compiled()) {
             result.push_back(m);

@@ -4,7 +4,6 @@
 
 #include "Argument.h"
 #include "Callable.h"
-#include "CodeGen_CIRCT.h"
 #include "CodeGen_Internal.h"
 #include "FindCalls.h"
 #include "Func.h"
@@ -931,7 +930,7 @@ void Pipeline::realize(JITUserContext *context,
     user_assert(defined()) << "Can't realize an undefined Pipeline\n";
 
     debug(2) << "Realizing Pipeline for " << target << "\n";
-
+#if 0
     if (target.has_feature(Target::Feature::CIRCT)) {
         debug(2) << "Realizing for CIRCT!\n";
         infer_arguments();
@@ -948,7 +947,7 @@ void Pipeline::realize(JITUserContext *context,
 
         return;
     }
-
+#endif
     if (target.has_unknowns()) {
         // If we've already jit-compiled for a specific target, use that.
         target = get_compiled_jit_target();

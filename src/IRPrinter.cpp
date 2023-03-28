@@ -120,6 +120,9 @@ ostream &operator<<(ostream &out, const DeviceAPI &api) {
     case DeviceAPI::WebGPU:
         out << "<WebGPU>";
         break;
+    case DeviceAPI::XRT:
+        out << "<XRT>";
+        break;
     }
     return out;
 }
