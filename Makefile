@@ -426,6 +426,8 @@ SOURCE_FILES = \
   ClampUnsafeAccesses.cpp \
   CodeGen_ARM.cpp \
   CodeGen_C.cpp \
+  CodeGen_CIRCT_Dev.cpp \
+  CodeGen_CIRCT_Xilinx_Dev.cpp \
   CodeGen_D3D12Compute_Dev.cpp \
   CodeGen_GPU_Dev.cpp \
   CodeGen_Hexagon.cpp \
@@ -505,6 +507,7 @@ SOURCE_FILES = \
   Monotonic.cpp \
   ObjectInstanceRegistry.cpp \
   OffloadGPULoops.cpp \
+  OffloadLoopsToAccelerator.cpp \
   OutputImageParam.cpp \
   ParallelRVar.cpp \
   Parameter.cpp \
@@ -611,6 +614,8 @@ HEADER_FILES = \
   ClampUnsafeAccesses.h \
   Closure.h \
   CodeGen_C.h \
+  CodeGen_CIRCT_Dev.h \
+  CodeGen_CIRCT_Xilinx_Dev.h \
   CodeGen_D3D12Compute_Dev.h \
   CodeGen_GPU_Dev.h \
   CodeGen_Internal.h \
@@ -695,6 +700,7 @@ HEADER_FILES = \
   Monotonic.h \
   ObjectInstanceRegistry.h \
   OffloadGPULoops.h \
+  OffloadLoopsToAccelerator.h \
   OutputImageParam.h \
   ParallelRVar.h \
   Param.h \
@@ -722,6 +728,7 @@ HEADER_FILES = \
   Schedule.h \
   ScheduleFunctions.h \
   Scope.h \
+  SelectAcceleratorAPI.h \
   SelectGPUAPI.h \
   Simplify.h \
   SimplifyCorrelatedDifferences.h \

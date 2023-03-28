@@ -101,29 +101,6 @@ class InjectGpuOffload : public IRMutator {
 
     const Target &target;
 
-    Expr get_state_var(const string &name) {
-        // Expr v = Variable::make(type_of<void *>(), name);
-        state_needed[name] = true;
-        return Load::make(type_of<void *>(), name, 0,
-                          Buffer<>(), Parameter(), const_true(), ModulusRemainder());
-    }
-
-    Expr make_state_var(const string &name) {
-        auto storage = Buffer<void *>::make_scalar(name + "_buf");
-        storage() = nullptr;
-        Expr buf = Variable::make(type_of<halide_buffer_t *>(), storage.name() + ".buffer", storage);
-        return Call::make(Handle(), Call::buffer_get_host, {buf}, Call::Extern);
-    }
-
-    // Create a Buffer containing the given vector, and return an
-    // expression for a pointer to the first element.
-    Expr make_buffer_ptr(const vector<char> &data, const string &name) {
-        Buffer<uint8_t> code((int)data.size(), name);
-        memcpy(code.data(), data.data(), (int)data.size());
-        Expr buf = Variable::make(type_of<halide_buffer_t *>(), name + ".buffer", code);
-        return Call::make(Handle(), Call::buffer_get_host, {buf}, Call::Extern);
-    }
-
     using IRMutator::visit;
 
     Stmt visit(const For *loop) override {
@@ -235,7 +212,7 @@ class InjectGpuOffload : public IRMutator {
 
         string api_unique_name = gpu_codegen->api_unique_name();
         vector<Expr> run_args = {
-            get_state_var(api_unique_name),
+            get_state_var(api_unique_name, state_needed[api_unique_name]),
             kernel_name,
             Expr(bounds.num_blocks[0]),
             Expr(bounds.num_blocks[1]),
@@ -304,7 +281,7 @@ public:
             Stmt init_kernels = call_extern_and_assert(init_kernels_name, init_args);
 
             string destructor_name = "halide_" + api_unique_name + "_finalize_kernels";
-            vector<Expr> finalize_args = {Expr(destructor_name), get_state_var(api_unique_name)};
+            vector<Expr> finalize_args = {Expr(destructor_name), get_state_var(api_unique_name, state_needed[api_unique_name])};
             Stmt register_destructor = Evaluate::make(
                 Call::make(Handle(), Call::register_destructor, finalize_args, Call::Intrinsic));
 

@@ -26,6 +26,36 @@ Stmt call_extern_and_assert(const string &name, const vector<Expr> &args) {
                          AssertStmt::make(EQ::make(call_result_var, 0), call_result_var));
 }
 
+Expr get_state_var(const string &name, bool &state_needed) {
+    // Expr v = Variable::make(type_of<void *>(), name);
+    state_needed = true;
+    return Load::make(type_of<void *>(), name, 0,
+                      Buffer<>(), Parameter(), const_true(), ModulusRemainder());
+}
+
+Expr make_state_var(const string &name) {
+    auto storage = Buffer<void *>::make_scalar(name + "_buf");
+    storage() = nullptr;
+    Expr buf = Variable::make(type_of<halide_buffer_t *>(), storage.name() + ".buffer", storage);
+    return Call::make(Handle(), Call::buffer_get_host, {buf}, Call::Extern);
+}
+
+// Create a Buffer containing the given vector, and return an
+// expression for a pointer to the first element.
+Expr make_buffer_ptr(const vector<char> &data, const string &name) {
+    Buffer<uint8_t> code((int)data.size(), name);
+    memcpy(code.data(), data.data(), (int)data.size());
+    Expr buf = Variable::make(type_of<halide_buffer_t *>(), name + ".buffer", code);
+    return Call::make(Handle(), Call::buffer_get_host, {buf}, Call::Extern);
+}
+
+Expr make_string_ptr(const string &str, const string &name) {
+    Buffer<uint8_t> code((int)str.length() + 1, name);
+    memcpy(code.data(), str.c_str(), (int)str.length() + 1);
+    Expr buf = Variable::make(type_of<halide_buffer_t *>(), name + ".buffer", code);
+    return Call::make(Handle(), Call::buffer_get_host, {buf}, Call::Extern);
+}
+
 namespace {
 
 class FindBufferUsage : public IRVisitor {

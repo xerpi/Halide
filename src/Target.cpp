@@ -932,6 +932,10 @@ bool Target::has_gpu_feature() const {
             has_feature(WebGPU));
 }
 
+bool Target::has_accelerator_feature() const {
+    return has_feature(CIRCT);
+}
+
 int Target::get_cuda_capability_lower_bound() const {
     if (!has_feature(Target::CUDA)) {
         return -1;
@@ -1058,6 +1062,9 @@ DeviceAPI Target::get_required_device_api() const {
     if (has_feature(Target::WebGPU)) {
         return DeviceAPI::WebGPU;
     }
+    if (has_feature(Target::CIRCT)) {
+        return DeviceAPI::XRT;
+    }
     return DeviceAPI::None;
 }
 
@@ -1077,6 +1084,8 @@ Target::Feature target_feature_for_device_api(DeviceAPI api) {
         return Target::D3D12Compute;
     case DeviceAPI::WebGPU:
         return Target::WebGPU;
+    case DeviceAPI::XRT:
+        return Target::CIRCT;
     default:
         return Target::FeatureEnd;
     }
@@ -1159,7 +1168,7 @@ bool Target::get_runtime_compatible_target(const Target &other, Target &result) 
     // (c) must match across both targets; it is an error if one target has the feature and the other doesn't
 
     // clang-format off
-    const std::array<Feature, 19> union_features = {{
+    const std::array<Feature, 20> union_features = {{
         // These are true union features.
         CUDA,
         D3D12Compute,
@@ -1168,6 +1177,7 @@ bool Target::get_runtime_compatible_target(const Target &other, Target &result) 
         OpenCL,
         OpenGLCompute,
         WebGPU,
+        CIRCT,
 
         // These features are actually intersection-y, but because targets only record the _highest_,
         // we have to put their union in the result and then take a lower bound.

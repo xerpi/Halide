@@ -230,6 +230,8 @@ struct Target {
      * TODO: Should OpenGLCompute be included here? */
     bool has_gpu_feature() const;
 
+    bool has_accelerator_feature() const;
+
     /** Does this target allow using a certain type. Generally all
      * types except 64-bit float and int/uint should be supported by
      * all backends.

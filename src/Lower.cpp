@@ -44,6 +44,7 @@
 #include "LowerWarpShuffles.h"
 #include "Memoization.h"
 #include "OffloadGPULoops.h"
+#include "OffloadLoopsToAccelerator.h"
 #include "PartitionLoops.h"
 #include "Prefetch.h"
 #include "Profiling.h"
@@ -55,6 +56,7 @@
 #include "RemoveExternLoops.h"
 #include "RemoveUndef.h"
 #include "ScheduleFunctions.h"
+#include "SelectAcceleratorAPI.h"
 #include "SelectGPUAPI.h"
 #include "Simplify.h"
 #include "SimplifyCorrelatedDifferences.h"
@@ -210,6 +212,7 @@ void lower_impl(const vector<Function> &output_funcs,
 
     bool will_inject_host_copies =
         (t.has_gpu_feature() ||
+         t.has_accelerator_feature() ||
          t.has_feature(Target::OpenGLCompute) ||
          t.has_feature(Target::HexagonDma) ||
          (t.arch != Target::Hexagon && (t.has_feature(Target::HVX))));
@@ -285,17 +288,25 @@ void lower_impl(const vector<Function> &output_funcs,
     }
 
     if (will_inject_host_copies) {
-        debug(1) << "Selecting a GPU API for GPU loops...\n";
-        s = select_gpu_api(s, t);
-        log("Lowering after selecting a GPU API:", s);
+        if (t.has_gpu_feature()) {
+            debug(1) << "Selecting a GPU API for GPU loops...\n";
+            s = select_gpu_api(s, t);
+            log("Lowering after selecting a GPU API:", s);
+        } else if (t.has_accelerator_feature()) {
+            debug(1) << "Selecting an Accelerator API for *all* loops...\n";
+            s = select_accelerator_api(s, t);
+            log("Lowering after selecting an accelerator API:", s);
+        }
 
         debug(1) << "Injecting host <-> dev buffer copies...\n";
         s = inject_host_dev_buffer_copies(s, t);
         log("Lowering after injecting host <-> dev buffer copies:", s);
 
-        debug(1) << "Selecting a GPU API for extern stages...\n";
-        s = select_gpu_api(s, t);
-        log("Lowering after selecting a GPU API for extern stages:", s);
+        if (t.has_gpu_feature()) {
+            debug(1) << "Selecting a GPU API for extern stages...\n";
+            s = select_gpu_api(s, t);
+            log("Lowering after selecting a GPU API for extern stages:", s);
+        }
     }
 
     debug(1) << "Simplifying...\n";
@@ -446,6 +457,15 @@ void lower_impl(const vector<Function> &output_funcs,
                  << s << "\n\n";
     } else {
         debug(1) << "Skipping GPU offload...\n";
+    }
+
+    if (t.has_accelerator_feature()) {
+        debug(1) << "Offloading loops to accelerator...\n";
+        s = inject_accelerator_offload(s, t);
+        debug(2) << "Lowering after splitting off loops to acceleration:\n"
+                 << s << "\n\n";
+    } else {
+        debug(1) << "Skipping aceelerator offload...\n";
     }
 
     // TODO: This needs to happen before lowering parallel tasks, because global
