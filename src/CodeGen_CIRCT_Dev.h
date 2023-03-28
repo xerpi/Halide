@@ -5,10 +5,15 @@
  * Defines the code-generator for producing CIRCT MLIR code
  */
 
+#include "DeviceArgument.h"
+#include "IRVisitor.h"
+#include "Scope.h"
+
 #include <mlir/IR/ImplicitLocOpBuilder.h>
 #include <mlir/IR/MLIRContext.h>
 
-#include <memory>
+#include <string>
+#include <vector>
 
 namespace Halide {
 

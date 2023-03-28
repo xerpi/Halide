@@ -1,16 +1,8 @@
-#include <string>
-#include <vector>
-
-#include <mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h>
 #include <mlir/Dialect/Arith/IR/Arith.h>
-#include <mlir/Dialect/ControlFlow/IR/ControlFlow.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/MemRef/IR/MemRef.h>
-#include <mlir/Dialect/SCF/IR/SCF.h>
 #include <mlir/Dialect/SCF/Transforms/Passes.h>
-#include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/ImplicitLocOpBuilder.h>
-#include <mlir/IR/MLIRContext.h>
 #include <mlir/IR/Verifier.h>
 #include <mlir/Pass/Pass.h>
 #include <mlir/Pass/PassManager.h>
@@ -18,34 +10,20 @@
 
 #include <circt/Conversion/CalyxToFSM.h>
 #include <circt/Conversion/CalyxToHW.h>
-#include <circt/Conversion/FSMToSV.h>
 #include <circt/Conversion/SCFToCalyx.h>
-#include <circt/Dialect/Calyx/CalyxDialect.h>
 #include <circt/Dialect/Calyx/CalyxEmitter.h>
-#include <circt/Dialect/Calyx/CalyxOps.h>
 #include <circt/Dialect/Calyx/CalyxPasses.h>
-#include <circt/Dialect/FSM/FSMDialect.h>
-#include <circt/Dialect/HW/HWDialect.h>
-#include <circt/Dialect/HW/HWOps.h>
-#include <circt/Dialect/HW/HWPasses.h>
-#include <circt/Dialect/SV/SVAttributes.h>
-#include <circt/Dialect/SV/SVOps.h>
 
-#include "CodeGen_Accelerator_Dev.h"
 #include "CodeGen_CIRCT_Dev.h"
-#include "CodeGen_Internal.h"
 #include "Debug.h"
 #include "IROperator.h"
-#include "IRVisitor.h"
-#include "Module.h"
-#include "Scope.h"
-#include "Util.h"
 
 namespace Halide {
 
 namespace Internal {
 
-bool CodeGen_CIRCT_Dev::compile(mlir::LocationAttr &loc, mlir::ModuleOp &mlir_module, Stmt stmt, const std::string &name, const std::vector<DeviceArgument> &args, std::string &calyxOutput) {
+bool CodeGen_CIRCT_Dev::compile(mlir::LocationAttr &loc, mlir::ModuleOp &mlir_module, Stmt stmt, const std::string &name,
+                                const std::vector<DeviceArgument> &args, std::string &calyxOutput) {
     debug(1) << "[Compiling kernel '" << name << "']\n";
 
     mlir::ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
@@ -109,8 +87,7 @@ bool CodeGen_CIRCT_Dev::compile(mlir::LocationAttr &loc, mlir::ModuleOp &mlir_mo
 
     // Generate Calyx (for debugging purposes)
     llvm::raw_string_ostream os(calyxOutput);
-    debug(1) << "[Exporting Calyx]"
-             << "\n";
+    debug(1) << "[Exporting Calyx]\n";
     auto exportVerilogResult = circt::calyx::exportCalyx(mlir_module, os);
     debug(1) << "[Export Calyx] Result: " << exportVerilogResult.succeeded() << "\n";
 
