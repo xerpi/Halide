@@ -148,34 +148,34 @@ void CodeGen_CIRCT_Dev::Visitor::codegen(const Stmt &s) {
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const IntImm *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
     mlir::Type type = builder.getIntegerType(op->type.bits());
     value = builder.create<mlir::arith::ConstantOp>(type, builder.getIntegerAttr(type, op->value));
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const UIntImm *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
     mlir::Type type = builder.getIntegerType(op->type.bits());
     value = builder.create<mlir::arith::ConstantOp>(type, builder.getIntegerAttr(type, op->value));
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const FloatImm *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const StringImm *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Cast *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     Halide::Type src = op->value.type();
     Halide::Type dst = op->type;
     mlir::Type dstType = builder.getIntegerType(dst.bits());
 
-    debug(1) << "\tSrc type: " << src << "\n";
-    debug(1) << "\tDst type: " << dst << "\n";
+    debug(3) << "\tSrc type: " << src << "\n";
+    debug(3) << "\tDst type: " << dst << "\n";
 
     value = codegen(op->value);
 
@@ -194,35 +194,35 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Cast *op) {
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Reinterpret *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Variable *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
-    debug(1) << "\tname: " << op->name << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
+    debug(3) << "\tname: " << op->name << "\n";
     value = sym_get(op->name, true);
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Add *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     value = builder.create<mlir::arith::AddIOp>(codegen(op->a), codegen(op->b));
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Sub *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     value = builder.create<mlir::arith::SubIOp>(codegen(op->a), codegen(op->b));
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Mul *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     value = builder.create<mlir::arith::MulIOp>(codegen(op->a), codegen(op->b));
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Div *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     if (op->type.is_int()) {
         value = builder.create<mlir::arith::DivSIOp>(codegen(op->a), codegen(op->b));
@@ -232,7 +232,7 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Div *op) {
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Mod *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     if (op->type.is_int()) {
         value = builder.create<mlir::arith::RemSIOp>(codegen(op->a), codegen(op->b));
@@ -242,7 +242,7 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Mod *op) {
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Min *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     std::string a_name = unique_name('a');
     std::string b_name = unique_name('b');
@@ -252,7 +252,7 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Min *op) {
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Max *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     std::string a_name = unique_name('a');
     std::string b_name = unique_name('b');
@@ -262,19 +262,19 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Max *op) {
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const EQ *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     value = builder.create<mlir::arith::CmpIOp>(mlir::arith::CmpIPredicate::eq, codegen(op->a), codegen(op->b));
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const NE *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     value = builder.create<mlir::arith::CmpIOp>(mlir::arith::CmpIPredicate::ne, codegen(op->a), codegen(op->b));
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const LT *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     mlir::arith::CmpIPredicate predicate = op->type.is_int() ? mlir::arith::CmpIPredicate::slt :
                                                                mlir::arith::CmpIPredicate::ult;
@@ -282,7 +282,7 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const LT *op) {
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const LE *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     mlir::arith::CmpIPredicate predicate = op->type.is_int() ? mlir::arith::CmpIPredicate::sle :
                                                                mlir::arith::CmpIPredicate::ule;
@@ -290,7 +290,7 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const LE *op) {
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const GT *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     mlir::arith::CmpIPredicate predicate = op->type.is_int() ? mlir::arith::CmpIPredicate::sgt :
                                                                mlir::arith::CmpIPredicate::ugt;
@@ -298,7 +298,7 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const GT *op) {
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const GE *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     mlir::arith::CmpIPredicate predicate = op->type.is_int() ? mlir::arith::CmpIPredicate::sge :
                                                                mlir::arith::CmpIPredicate::uge;
@@ -306,17 +306,17 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const GE *op) {
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const And *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     // value = builder.create<mlir::arith::CmpIOp>(predicate, codegen(op->a), codegen(op->b));
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Or *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Not *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     mlir::Value a = codegen(op->a);
     mlir::Value allZeroes = builder.create<mlir::arith::ConstantOp>(a.getType(), builder.getIntegerAttr(a.getType(), 0));
@@ -324,7 +324,7 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Not *op) {
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Select *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     // mlir::Value trueValue = codegen(op->true_value);
     // mlir::Value falseValue = codegen(op->false_value);
@@ -368,8 +368,8 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Select *op) {
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Load *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
-    debug(1) << "\tName: " << op->name << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
+    debug(3) << "\tName: " << op->name << "\n";
 
     mlir::Value baseAddr = sym_get(op->name);
     mlir::Value index = builder.create<mlir::arith::ExtUIOp>(builder.getI64Type(), codegen(op->index));
@@ -382,49 +382,29 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Load *op) {
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Ramp *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Broadcast *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Call *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
-    debug(1) << "\tName: " << op->name << "\n";
-    debug(1) << "\tCall type: " << op->call_type << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
+    debug(3) << "\tName: " << op->name << "\n";
+    debug(3) << "\tCall type: " << op->call_type << "\n";
     for (const Expr &e : op->args)
-        debug(1) << "\tArg: " << e << "\n";
+        debug(3) << "\tArg: " << e << "\n";
 
     mlir::Type op_type = builder.getIntegerType(op->type.bits());
+    // Just return 1 for now
+    value = builder.create<mlir::arith::ConstantOp>(op_type, builder.getIntegerAttr(op_type, 1));
 
-    if (op->name == Call::buffer_get_host) {
-        auto name = op->args[0].as<Variable>()->name;
-        name = name.substr(0, name.find(".buffer"));
-        value = sym_get(name);
-    } else if (op->name == Call::buffer_get_min) {
-        auto name = op->args[0].as<Variable>()->name;
-        name = name.substr(0, name.find(".buffer"));
-        int32_t d = op->args[1].as<IntImm>()->value;
-        value = sym_get(name + "_dim_" + std::to_string(d) + "_min");
-    } else if (op->name == Call::buffer_get_extent) {
-        auto name = op->args[0].as<Variable>()->name;
-        name = name.substr(0, name.find(".buffer"));
-        int32_t d = op->args[1].as<IntImm>()->value;
-        value = sym_get(name + "_dim_" + std::to_string(d) + "_extent");
-    } else if (op->name == Call::buffer_get_stride) {
-        auto name = op->args[0].as<Variable>()->name;
-        name = name.substr(0, name.find(".buffer"));
-        int32_t d = op->args[1].as<IntImm>()->value;
-        value = sym_get(name + "_dim_" + std::to_string(d) + "_stride");
-    } else {
-        // Just return 1 for now
-        value = builder.create<mlir::arith::ConstantOp>(op_type, builder.getIntegerAttr(op_type, 1));
-    }
+    internal_error << "CodeGen_CIRCT_Dev::Visitor::visit(const Call *op) not implemented\n";
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Let *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     sym_push(op->name, codegen(op->value));
     value = codegen(op->body);
@@ -432,31 +412,30 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Let *op) {
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const LetStmt *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
-    debug(1) << "Contents:"
-             << "\n";
-    debug(1) << "\tName: " << op->name << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
+    debug(3) << "Contents:\n";
+    debug(3) << "\tName: " << op->name << "\n";
     sym_push(op->name, codegen(op->value));
     codegen(op->body);
     sym_pop(op->name);
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const AssertStmt *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const ProducerConsumer *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
-    debug(1) << "\tName: " << op->name << "\n";
-    debug(1) << "\tIs producer: " << op->is_producer << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
+    debug(3) << "\tName: " << op->name << "\n";
+    debug(3) << "\tIs producer: " << op->is_producer << "\n";
     codegen(op->body);
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const For *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
-    debug(1) << "\tName: " << op->name << "\n";
-    debug(1) << "\tMin: " << op->min << "\n";
-    debug(1) << "\tExtent: " << op->extent << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
+    debug(3) << "\tName: " << op->name << "\n";
+    debug(3) << "\tMin: " << op->min << "\n";
+    debug(3) << "\tExtent: " << op->extent << "\n";
     static const char *for_types[] = {
         "Serial",
         "Parallel",
@@ -467,7 +446,7 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const For *op) {
         "GPUThread",
         "GPULane",
     };
-    debug(1) << "\tForType: " << for_types[unsigned(op->for_type)] << "\n";
+    debug(3) << "\tForType: " << for_types[unsigned(op->for_type)] << "\n";
 
     mlir::Value min = codegen(op->min);
     mlir::Value extent = codegen(op->extent);
@@ -490,8 +469,8 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const For *op) {
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Store *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
-    debug(1) << "\tName: " << op->name << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
+    debug(3) << "\tName: " << op->name << "\n";
 
     mlir::Value baseAddr = sym_get(op->name);
     mlir::Value index = builder.create<mlir::arith::ExtUIOp>(builder.getI64Type(), codegen(op->index));
@@ -504,36 +483,36 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Store *op) {
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Provide *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Allocate *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     int32_t size = op->constant_allocation_size();
 
-    debug(1) << "  name: " << op->name << "\n";
-    debug(1) << "  type: " << op->type << "\n";
-    debug(1) << "  memory_type: " << int(op->memory_type) << "\n";
-    debug(1) << "  size: " << size << "\n";
+    debug(3) << "  name: " << op->name << "\n";
+    debug(3) << "  type: " << op->type << "\n";
+    debug(3) << "  memory_type: " << int(op->memory_type) << "\n";
+    debug(3) << "  size: " << size << "\n";
 
     for (auto &ext : op->extents) {
-        debug(1) << "  ext: " << ext << "\n";
+        debug(3) << "  ext: " << ext << "\n";
     }
 
     codegen(op->body);
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Free *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Realize *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Block *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
     // Peel blocks of assertions with pure conditions
     const AssertStmt *a = op->first.as<AssertStmt>();
     if (a && is_pure(a->condition)) {
@@ -553,12 +532,11 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Block *op) {
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const IfThenElse *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
-    debug(1) << "Contents:"
-             << "\n";
-    debug(1) << "\tcondition: " << op->condition << "\n";
-    debug(1) << "\tthen_case: " << op->then_case << "\n";
-    debug(1) << "\telse_case: " << op->else_case << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
+    debug(3) << "Contents:\n";
+    debug(3) << "\tcondition: " << op->condition << "\n";
+    debug(3) << "\tthen_case: " << op->then_case << "\n";
+    debug(3) << "\telse_case: " << op->else_case << "\n";
 
     codegen(op->condition);
     codegen(op->then_case);
@@ -571,7 +549,7 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const IfThenElse *op) {
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Evaluate *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
     codegen(op->value);
 
     // Discard result
@@ -579,27 +557,27 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Evaluate *op) {
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Shuffle *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const VectorReduce *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Prefetch *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Fork *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Acquire *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Atomic *op) {
-    debug(1) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
 void CodeGen_CIRCT_Dev::Visitor::sym_push(const std::string &name, mlir::Value value) {
