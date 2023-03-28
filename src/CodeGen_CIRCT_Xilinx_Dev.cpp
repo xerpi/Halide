@@ -7,13 +7,11 @@
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/ToolOutputFile.h>
 
-#include <mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h>
 #include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/Dialect/ControlFlow/IR/ControlFlow.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/MemRef/IR/MemRef.h>
 #include <mlir/Dialect/SCF/IR/SCF.h>
-#include <mlir/Dialect/SCF/Transforms/Passes.h>
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/ImplicitLocOpBuilder.h>
 #include <mlir/IR/MLIRContext.h>
@@ -23,16 +21,13 @@
 #include <mlir/Support/FileUtilities.h>
 #include <mlir/Transforms/Passes.h>
 
-#include <circt/Conversion/CalyxToFSM.h>
-#include <circt/Conversion/CalyxToHW.h>
 #include <circt/Conversion/ExportVerilog.h>
 #include <circt/Conversion/FSMToSV.h>
-#include <circt/Conversion/SCFToCalyx.h>
 #include <circt/Dialect/Calyx/CalyxDialect.h>
-#include <circt/Dialect/Calyx/CalyxEmitter.h>
-#include <circt/Dialect/Calyx/CalyxOps.h>
-#include <circt/Dialect/Calyx/CalyxPasses.h>
+#include <circt/Dialect/Comb/CombDialect.h>
+#include <circt/Dialect/Comb/CombOps.h>
 #include <circt/Dialect/FSM/FSMDialect.h>
+#include <circt/Dialect/FSM/FSMOps.h>
 #include <circt/Dialect/HW/HWDialect.h>
 #include <circt/Dialect/HW/HWOps.h>
 #include <circt/Dialect/HW/HWPasses.h>
@@ -46,7 +41,6 @@
 #include "CodeGen_Accelerator_Dev.h"
 #include "CodeGen_CIRCT_Dev.h"
 #include "CodeGen_CIRCT_Xilinx_Dev.h"
-#include "CodeGen_Internal.h"
 #include "Debug.h"
 #include "IROperator.h"
 #include "IRVisitor.h"
