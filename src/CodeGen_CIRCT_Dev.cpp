@@ -2,6 +2,7 @@
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/MemRef/IR/MemRef.h>
 #include <mlir/Dialect/SCF/Transforms/Passes.h>
+#include <mlir/Dialect/Vector/IR/VectorOps.h>
 #include <mlir/IR/ImplicitLocOpBuilder.h>
 #include <mlir/IR/Verifier.h>
 #include <mlir/Pass/Pass.h>
@@ -72,6 +73,7 @@ bool CodeGen_CIRCT_Dev::compile(mlir::LocationAttr &loc, mlir::ModuleOp &mlir_mo
     // Create and run passes
     debug(1) << "[SCF to Calyx] Start.\n";
     mlir::PassManager pmSCFToCalyx(mlir_module.getContext());
+    pmSCFToCalyx.enableIRPrinting();
     pmSCFToCalyx.addPass(mlir::createForToWhileLoopPass());
     pmSCFToCalyx.addPass(mlir::createCanonicalizerPass());
     pmSCFToCalyx.addPass(circt::createSCFToCalyxPass());
@@ -383,6 +385,50 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Load *op) {
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Ramp *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
+
+    mlir::Value base = codegen(op->base);
+    mlir::Value stride = codegen(op->stride);
+    mlir::Type elementType = builder.getIntegerType(op->base.type().bits());
+    mlir::VectorType vectorType = mlir::VectorType::get(op->lanes, elementType);
+
+    mlir::SmallVector<mlir::Attribute> indicesAttrs(op->lanes);
+    for (int i = 0; i < op->lanes; i++)
+        indicesAttrs[i] = mlir::IntegerAttr::get(elementType, i);
+
+    mlir::DenseElementsAttr indicesDenseAttr = mlir::DenseElementsAttr::get(vectorType, indicesAttrs);
+    mlir::Value indicesConst = builder.create<mlir::arith::ConstantOp>(indicesDenseAttr);
+    mlir::Value splatStride = builder.create<mlir::vector::SplatOp>(vectorType, stride);
+    mlir::Value offsets = builder.create<mlir::arith::MulIOp>(splatStride, indicesConst);
+    mlir::Value splatBase = builder.create<mlir::vector::SplatOp>(vectorType, base);
+    value = builder.create<mlir::arith::AddIOp>(splatBase, offsets);
+
+    /*
+        mlir::Value vector = builder.create<mlir::arith::ConstantOp>(vectorType);
+        // mlir::SmallVector<mlir::Value> elements;
+        for (int i = 0; i < op->lanes; i++) {
+            // mlir::Value element = builder.create<mlir::arith::ConstantOp>(builder.getIntegerAttr(elementType, i));
+            // elements[i] = builder.create<mlir::vector::InsertElementOp>(type, value, element, i);
+            mlir::Value index = builder.create<mlir::arith::ConstantOp>(builder.getIntegerAttr(elementType, i));
+            mlir::Value offset = builder.create<mlir::arith::MulIOp>(index, stride);
+            vector = builder.create<mlir::vector::InsertElementOp>(type, value, element, i);
+            // elements[i] = builder.create<mlir::arith::AddIOp>(base, offset);
+        }
+
+        builder.getI32VectorAttr
+
+        mlir::DenseElementsAttr::get(vectorType, );
+        vector = builder.create<mlir::arith::ConstantOp>(builder.getIntegerAttr(elementType, i));
+    */
+    // elements[i] = builder.create<mlir::vector::InsertElementOp>(type, value, element, i);
+
+    /** A linear ramp vector node. This is vector with 'lanes' elements,
+     * where element i is 'base' + i*'stride'. This is a convenient way to
+     * pass around vectors without busting them up into individual
+     * elements. E.g. a dense vector load from a buffer can use a ramp
+     * node with stride 1 as the index. */
+    // struct Ramp : public ExprNode<Ramp> {
+    //     Expr base, stride;
+    //     int lanes;
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Broadcast *op) {
@@ -471,15 +517,25 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const For *op) {
 void CodeGen_CIRCT_Dev::Visitor::visit(const Store *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
     debug(3) << "\tName: " << op->name << "\n";
+    debug(3) << "\tValue lanes: " << op->value.type().lanes() << "\n";
+
+    mlir::Value index;
+    if (op->value.type().is_scalar()) {
+        index = codegen(op->index);
+    } else if (Expr ramp_base = strided_ramp_base(op->index); ramp_base.defined()) {
+        index = codegen(ramp_base / op->value.type().lanes());
+    } else {
+        user_error << "Unsupported store.";
+    }
 
     mlir::Value baseAddr = sym_get(op->name);
-    mlir::Value index = builder.create<mlir::arith::ExtUIOp>(builder.getI64Type(), codegen(op->index));
+    mlir::Value indexI64 = builder.create<mlir::arith::ExtUIOp>(builder.getI64Type(), index);
     mlir::Value elementSize = builder.create<mlir::arith::ConstantOp>(builder.getI64IntegerAttr(op->value.type().bytes()));
-    mlir::Value offset = builder.create<mlir::arith::MulIOp>(index, elementSize);
+    mlir::Value offset = builder.create<mlir::arith::MulIOp>(indexI64, elementSize);
     mlir::Value storeAddress = builder.create<mlir::arith::AddIOp>(baseAddr, offset);
     mlir::Value storeAddressAsIndex = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), storeAddress);
 
-    builder.create<mlir::memref::StoreOp>(codegen(op->value), sym_get(op->name + ".buffer"), mlir::ValueRange{storeAddressAsIndex});
+    builder.create<mlir::vector::StoreOp>(codegen(op->value), sym_get(op->name + ".buffer"), mlir::ValueRange{storeAddressAsIndex});
 }
 
 void CodeGen_CIRCT_Dev::Visitor::visit(const Provide *op) {

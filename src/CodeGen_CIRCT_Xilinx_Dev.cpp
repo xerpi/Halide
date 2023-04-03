@@ -12,6 +12,7 @@
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/MemRef/IR/MemRef.h>
 #include <mlir/Dialect/SCF/IR/SCF.h>
+#include <mlir/Dialect/Vector/IR/VectorOps.h>
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/ImplicitLocOpBuilder.h>
 #include <mlir/IR/MLIRContext.h>
@@ -128,6 +129,7 @@ private:
 };
 
 CodeGen_CIRCT_Xilinx_Dev::CodeGen_CIRCT_Xilinx_Dev(const Target &target) {
+    mlir_context.disableMultithreading();
     mlir_context.loadDialect<circt::calyx::CalyxDialect>();
     mlir_context.loadDialect<circt::comb::CombDialect>();
     mlir_context.loadDialect<circt::fsm::FSMDialect>();
@@ -138,6 +140,7 @@ CodeGen_CIRCT_Xilinx_Dev::CodeGen_CIRCT_Xilinx_Dev(const Target &target) {
     mlir_context.loadDialect<mlir::func::FuncDialect>();
     mlir_context.loadDialect<mlir::memref::MemRefDialect>();
     mlir_context.loadDialect<mlir::scf::SCFDialect>();
+    mlir_context.loadDialect<mlir::vector::VectorDialect>();
 }
 
 void CodeGen_CIRCT_Xilinx_Dev::add_kernel(Stmt stmt, const std::string &name, const std::vector<DeviceArgument> &args) {
