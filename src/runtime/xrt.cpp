@@ -103,6 +103,7 @@ struct XrtBufferHandle {
     // If nullptr, it means not allocated yet
     xrtBufferHandle handle;
     size_t size;
+    bool copy_to_device_pending;
 };
 
 // XrtKernelState represents a loaded kernel on the device
@@ -157,6 +158,7 @@ WEAK int halide_xrt_device_malloc(void *user_context, halide_buffer_t *buf) {
     // bank to allocate from is not known until the xclbin is loaded.
     XrtBufferHandle *handle =
         (XrtBufferHandle *)malloc(sizeof(XrtBufferHandle));
+    memset(handle, 0, sizeof(*handle));
     handle->handle = nullptr;
     handle->size = buf->size_in_bytes();
 
@@ -257,14 +259,45 @@ WEAK int halide_xrt_buffer_copy(void *user_context,
     return halide_error_code_generic_error;
 }
 
+static int sync_bo_to_device(void *user_context, XrtBufferHandle *handle, const void *host, size_t size) {
+    int ret;
+    debug(user_context)
+        << "sync_bo_to_device: buf->size_in_bytes(): " << (uint64_t)size
+        << ", handle->size: " << (uint64_t)handle->size << "\n";
+
+    ret = xrtBOWrite(handle->handle, host, size, 0);
+    if (ret) {
+        error(user_context) << "XRT: halide_xrt_copy_to_device: xrtBOWrite failed: "
+                            << ret << "\n";
+        return halide_error_code_generic_error;
+    }
+
+    ret = xrtBOSync(handle->handle, XCL_BO_SYNC_BO_TO_DEVICE, size, 0);
+    if (ret) {
+        error(user_context) << "XRT: halide_xrt_copy_to_device: xrtBOSync failed: "
+                            << ret << "\n";
+        return halide_error_code_generic_error;
+    }
+
+    return halide_error_code_success;
+}
+
 WEAK int halide_xrt_copy_to_device(void *user_context,
                                    halide_buffer_t *buf) {
     debug(user_context)
         << "XRT: halide_xrt_copy_to_device (user_context: " << user_context
         << ", buf: " << buf << ")\n";
 
-    return halide_xrt_buffer_copy(user_context, buf,
-                                  &xrt_device_interface, buf);
+    XrtBufferHandle *handle = (XrtBufferHandle *)buf->device;
+
+    XRTContext context(user_context);
+    if (context.error_code)
+        return context.error_code;
+
+    // The copy to device will take place just before launching the kernel.
+    handle->copy_to_device_pending = true;
+
+    return halide_error_code_success;
 }
 
 WEAK int halide_xrt_copy_to_host(void *user_context,
@@ -467,6 +500,13 @@ WEAK int halide_xrt_run(void *user_context,
                 debug(user_context) << "XRT: halide_xrt_run: "
                                     << "allocated buffer with size: " << (uint64_t)buf->size
                                     << " at physical address: " << (void *)xrtBOAddress(buf->handle) << "\n";
+
+                if (buf->copy_to_device_pending) {
+                    debug(user_context) << "  buffer has a copy to device pending.\n";
+                    // memset(buffer->host, 0xFF, buf->size);
+                    sync_bo_to_device(user_context, buf, buffer->host, buf->size);
+                    buf->copy_to_device_pending = false;
+                }
             }
             ret = xrtRunSetArg(run_handle, num_args, buf->handle);
         } else {
