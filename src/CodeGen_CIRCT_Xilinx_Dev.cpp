@@ -1135,24 +1135,17 @@ void CodeGen_CIRCT_Xilinx_Dev::generateToplevel(mlir::ImplicitLocOpBuilder &buil
     }
 
     for (unsigned i = 0; i < numBufferArgs; i++) {
-        kernelInputs.push_back(CalyxExtMemToAxiInstances[i].getResult(
-            hwModuleGetOutputIndex(CalyxExtMemToAxiInstances[i], "calyx_read_data")));
-        kernelArgNames.push_back(builder.getStringAttr("ext_mem" + std::to_string(i) + "_read_data"));
-
-        kernelInputs.push_back(CalyxExtMemToAxiInstances[i].getResult(
-            hwModuleGetOutputIndex(CalyxExtMemToAxiInstances[i], "calyx_done")));
-        kernelArgNames.push_back(builder.getStringAttr("ext_mem" + std::to_string(i) + "_done"));
-
-        kernelResultTypes.push_back(builder.getIntegerType(M_AXI_DATA_WIDTH));
-        kernelResultNames.push_back(builder.getStringAttr("ext_mem" + std::to_string(i) + "_write_data"));
-        kernelResultTypes.push_back(builder.getIntegerType(M_AXI_ADDR_WIDTH));
-        kernelResultNames.push_back(builder.getStringAttr("ext_mem" + std::to_string(i) + "_addr0"));
-        kernelResultTypes.push_back(builder.getI1Type());
-        kernelResultNames.push_back(builder.getStringAttr("ext_mem" + std::to_string(i) + "_write_en"));
-        kernelResultTypes.push_back(builder.getI1Type());
-        kernelResultNames.push_back(builder.getStringAttr("ext_mem" + std::to_string(i) + "_read_en"));
-        kernelResultTypes.push_back(builder.getIntegerType(3));
-        kernelResultNames.push_back(builder.getStringAttr("ext_mem" + std::to_string(i) + "_access_size"));
+        for (const auto &signal : calyxExtMemSignals) {
+            std::string signalNameSuffix = signal.name.str().substr(std::string("calyx_").length());
+            if (signal.direction == circt::hw::PortDirection::INPUT) {
+                kernelResultTypes.push_back(signal.type);
+                kernelResultNames.push_back(builder.getStringAttr("ext_mem" + std::to_string(i) + "_" + signalNameSuffix));
+            } else {
+                kernelInputs.push_back(CalyxExtMemToAxiInstances[i].getResult(
+                    hwModuleGetOutputIndex(CalyxExtMemToAxiInstances[i], signal.name.str())));
+                kernelArgNames.push_back(builder.getStringAttr("ext_mem" + std::to_string(i) + "_" + signalNameSuffix));
+            }
+        }
     }
 
     kernelInputs.push_back(clock);
@@ -1368,11 +1361,12 @@ void CodeGen_CIRCT_Xilinx_Dev::portsAddAXI4LiteSubordinateSignals(mlir::Implicit
 void CodeGen_CIRCT_Xilinx_Dev::portsAddCalyxExtMemInterfaceSubordinateSignals(mlir::ImplicitLocOpBuilder &builder,
                                                                               int addrWidth, int dataWidth,
                                                                               mlir::SmallVector<circt::hw::PortInfo> &ports) {
+    // Must follow same order as SCFToCalyx's appendPortsForExternalMemref
     const mlir::SmallVector<SignalInfo> signals = {
-        {"calyx_addr0", addrWidth, true},
-        {"calyx_read_en", 1, true},
-        {"calyx_write_en", 1, true},
         {"calyx_write_data", dataWidth, true},
+        {"calyx_addr0", addrWidth, true},
+        {"calyx_write_en", 1, true},
+        {"calyx_read_en", 1, true},
         {"calyx_access_size", 3, true},
         {"calyx_read_data", dataWidth, false},
         {"calyx_done", 1, false},
