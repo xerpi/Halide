@@ -544,7 +544,7 @@ void CodeGen_CIRCT_Xilinx_Dev::generateCalyxExtMemToAxi(mlir::ImplicitLocOpBuild
     for (const auto &name : fsmOutputCalyxExtMemSignalNames)
         hwModuleOutputValues[hwModuleGetOutputIndex(mod, name)] = fsmOp.getResult(outputIndex++);
 
-    // Constant outputs
+    // Calculate outputs
     auto hwModCreateAxiOutputConstantOp = [&](const std::string &name, int64_t value) {
         unsigned int idx = hwModuleGetAxiMOutputIndex(mod, name);
         mlir::Type type = mod.getResultTypes()[idx];
@@ -555,18 +555,52 @@ void CodeGen_CIRCT_Xilinx_Dev::generateCalyxExtMemToAxi(mlir::ImplicitLocOpBuild
         hwModuleOutputValues[hwModuleGetAxiMOutputIndex(mod, name)] = hwModCreateAxiOutputConstantOp(name, value);
     };
 
-    hwModSetAxiOutputConstant("arlen", 0);   // 1 transfer
-    hwModSetAxiOutputConstant("awlen", 0);   // 1 transfer
-    hwModSetAxiOutputConstant("wstrb", -1);  // All bytes valid
-    hwModSetAxiOutputConstant("wlast", 1);   // Last transfer
+    auto createConstantT = [&](mlir::Type type, int64_t value) {
+        return builder.create<circt::hw::ConstantOp>(type, value);
+    };
 
-    auto addr0 = hwModuleGetInputValue(mod, "calyx_addr0");
-    hwModuleOutputValues[hwModuleGetAxiMOutputIndex(mod, "araddr")] = addr0;
-    hwModuleOutputValues[hwModuleGetAxiMOutputIndex(mod, "awaddr")] = addr0;
-    hwModuleOutputValues[hwModuleGetAxiMOutputIndex(mod, "wdata")] = hwModuleGetInputValue(mod, "calyx_write_data");
+    auto createConstant = [&](int size, int64_t value) {
+        return createConstantT(builder.getIntegerType(size), value);
+    };
 
-    // TODO
-    hwModuleOutputValues[hwModuleGetOutputIndex(mod, "calyx_read_data")] = hwModuleGetAxiMInputValue(mod, "rdata");
+    auto zeroExtend = [&](mlir::Value value, int dstSize) -> mlir::Value {
+        int size = value.getType().getIntOrFloatBitWidth();
+        if (size != dstSize) {
+            auto zeroes = builder.create<circt::hw::ConstantOp>(builder.getIntegerType(dstSize - size), 0);
+            return builder.create<circt::comb::ConcatOp>(zeroes, value);
+        } else {
+            return value;
+        }
+    };
+
+    auto calyxAddr0 = hwModuleGetInputValue(mod, "calyx_addr0");
+    auto calyxAccessSize = hwModuleGetInputValue(mod, "calyx_access_size");
+    auto calyxWriteData = hwModuleGetInputValue(mod, "calyx_write_data");
+    auto axiReaddData = hwModuleGetAxiMInputValue(mod, "rdata");
+
+    auto accessDataBusOffset = zeroExtend(builder.create<circt::comb::ExtractOp>(calyxAddr0, 0, llvm::Log2_32(M_AXI_DATA_WIDTH / 8)),
+                                          M_AXI_DATA_WIDTH / 8);
+
+    int wstrbSize = M_AXI_DATA_WIDTH / 8;
+    auto cst1Wstrb = createConstant(wstrbSize, 1);
+    auto accessSizeBytes = builder.create<circt::comb::ShlOp>(createConstant(wstrbSize, 1), zeroExtend(calyxAccessSize, wstrbSize));
+    auto accessSizePow2 = builder.create<circt::comb::ShlOp>(cst1Wstrb, accessSizeBytes);
+    auto accessSizeMask = builder.create<circt::comb::SubOp>(accessSizePow2, cst1Wstrb);
+    hwModuleOutputValues[hwModuleGetAxiMOutputIndex(mod, "wstrb")] = builder.create<circt::comb::ShlOp>(accessSizeMask, accessDataBusOffset);
+
+    auto accessDataBusOffsetBits = builder.create<circt::comb::ShlOp>(accessDataBusOffset, createConstantT(accessDataBusOffset.getType(), 3));
+    auto accessDataBusOffsetBitsExt = zeroExtend(accessDataBusOffsetBits, M_AXI_DATA_WIDTH);
+    auto wdata = builder.create<circt::comb::ShlOp>(calyxWriteData, accessDataBusOffsetBitsExt);
+    hwModuleOutputValues[hwModuleGetAxiMOutputIndex(mod, "wdata")] = wdata;
+
+    hwModuleOutputValues[hwModuleGetOutputIndex(mod, "calyx_read_data")] = builder.create<circt::comb::ShrUOp>(axiReaddData,
+                                                                                                               accessDataBusOffsetBitsExt);
+    hwModuleOutputValues[hwModuleGetAxiMOutputIndex(mod, "araddr")] = calyxAddr0;
+    hwModuleOutputValues[hwModuleGetAxiMOutputIndex(mod, "awaddr")] = calyxAddr0;
+
+    hwModSetAxiOutputConstant("arlen", 0);  // 1 transfer
+    hwModSetAxiOutputConstant("awlen", 0);  // 1 transfer
+    hwModSetAxiOutputConstant("wlast", 1);  // Last transfer
 
     // Set module output operands
     auto outputOp = mod.getBodyBlock()->getTerminator();
