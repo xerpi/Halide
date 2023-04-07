@@ -15,7 +15,7 @@ struct Target;
 
 namespace Internal {
 
-Stmt inject_accelerator_offload(const Stmt &s, const Target &host_target);
+Stmt inject_accelerator_offload(const Stmt &s, const Target &host_target, const std::string &pipeline_name);
 
 }  // namespace Internal
 }  // namespace Halide

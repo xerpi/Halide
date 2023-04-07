@@ -463,7 +463,7 @@ void lower_impl(const vector<Function> &output_funcs,
 
     if (t.has_accelerator_feature()) {
         debug(1) << "Offloading loops to accelerator...\n";
-        s = inject_accelerator_offload(s, t);
+        s = inject_accelerator_offload(s, t, pipeline_name);
         debug(2) << "Lowering after splitting off loops to acceleration:\n"
                  << s << "\n\n";
     } else {

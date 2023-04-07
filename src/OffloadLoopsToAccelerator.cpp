@@ -28,12 +28,13 @@ class InjectAcceleratorOffload : public IRMutator {
     map<string, bool> state_needed;
 
     const Target &target;
+    std::string pipeline_name;
 
     using IRMutator::visit;
 
     Stmt visit(const For *loop) override {
         // We're in the loop over outermost block dimension
-        debug(2) << "Creating kernel for loop " << loop->name << "\n";
+        debug(2) << "Creating kernel for pipeline " << pipeline_name << ", loop " << loop->name << "\n";
 
         // Compute a closure over the state passed into the kernel
         HostClosure c;
@@ -43,7 +44,7 @@ class InjectAcceleratorOffload : public IRMutator {
         vector<DeviceArgument> closure_args = c.arguments();
 
         // Compile the kernel
-        string kernel_name = unique_name("kernel_" + loop->name);
+        string kernel_name = unique_name(pipeline_name + "_kernel_" + loop->name);
 
         CodeGen_Accelerator_Dev *acc_codegen = cgdev[target.get_required_device_api()].get();
         user_assert(acc_codegen != nullptr)
@@ -105,8 +106,8 @@ class InjectAcceleratorOffload : public IRMutator {
     }
 
 public:
-    InjectAcceleratorOffload(const Target &target)
-        : target(target) {
+    InjectAcceleratorOffload(const Target &target, const std::string &pipeline_name)
+        : target(target), pipeline_name(pipeline_name) {
         if (target.has_feature(Target::CIRCT)) {
             cgdev[DeviceAPI::XRT] = new_CodeGen_CIRCT_Xilinx_Dev(target);
         }
@@ -149,8 +150,8 @@ public:
 
 }  // namespace
 
-Stmt inject_accelerator_offload(const Stmt &s, const Target &host_target) {
-    return InjectAcceleratorOffload(host_target).inject(s);
+Stmt inject_accelerator_offload(const Stmt &s, const Target &host_target, const std::string &pipeline_name) {
+    return InjectAcceleratorOffload(host_target, pipeline_name).inject(s);
 }
 
 }  // namespace Internal
