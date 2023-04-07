@@ -99,9 +99,9 @@ private:
     static constexpr char AXI_CONTROL_PREFIX[] = "s_axi_control";
 
     static void generateKernelXml(llvm::raw_ostream &os, const std::string &kernelName, const std::vector<DeviceArgument> &kernelArgs);
-    static void generateCalyxExtMemToAxi(mlir::ImplicitLocOpBuilder &builder);
-    static void generateControlAxi(mlir::ImplicitLocOpBuilder &builder, const std::vector<DeviceArgument> &kernelArgs);
-    static void generateToplevel(mlir::ImplicitLocOpBuilder &builder, const std::string &kernelName, const std::vector<DeviceArgument> &kernelArgs);
+    static void generateCalyxExtMemToAxi(mlir::ImplicitLocOpBuilder &topBuilder);
+    static void generateControlAxi(mlir::ImplicitLocOpBuilder &topBuilder, const std::vector<DeviceArgument> &kernelArgs);
+    static void generateToplevel(mlir::ImplicitLocOpBuilder &topBuilder, const std::string &kernelName, const std::vector<DeviceArgument> &kernelArgs);
 
     static void portsAddAXI4ManagerSignalsPrefix(mlir::ImplicitLocOpBuilder &builder, const std::string &prefix,
                                                  int addrWidth, int dataWidth,
@@ -143,8 +143,12 @@ private:
         assert(0);
     }
 
-    static mlir::Value hwModuleGetAxiInputValue(circt::hw::HWModuleOp &mod, const std::string &name) {
+    static mlir::Value hwModuleGetAxiSInputValue(circt::hw::HWModuleOp &mod, const std::string &name) {
         return hwModuleGetInputValue(mod, toFullAxiSubordinateSignalName(name));
+    };
+
+    static mlir::Value hwModuleGetAxiMInputValue(circt::hw::HWModuleOp &mod, const std::string &name) {
+        return hwModuleGetInputValue(mod, toFullAxiManagerSignalName(name));
     };
 
     template<typename ModType>
@@ -159,8 +163,12 @@ private:
         return i;
     };
 
-    static unsigned int hwModuleGetAxiOutputIndex(circt::hw::HWModuleOp &mod, const std::string &name) {
+    static unsigned int hwModuleGetAxiSOutputIndex(circt::hw::HWModuleOp &mod, const std::string &name) {
         return hwModuleGetOutputIndex(mod, toFullAxiSubordinateSignalName(name));
+    };
+
+    static unsigned int hwModuleGetAxiMOutputIndex(circt::hw::HWModuleOp &mod, const std::string &name) {
+        return hwModuleGetOutputIndex(mod, toFullAxiManagerSignalName(name));
     };
 
     static mlir::Value fsmGetInputValue(circt::fsm::MachineOp &fsm, const std::string &name) {
@@ -242,17 +250,14 @@ void CodeGen_CIRCT_Xilinx_Dev::add_kernel(Stmt stmt, const std::string &name, co
     }
 
     // Create Calyx external memory to AXI interface
-    builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
     debug(1) << "[Adding CalyxExtMemToAxi]\n";
     generateCalyxExtMemToAxi(builder);
 
     // Add AXI control
-    builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
     debug(1) << "[Adding Control AXI]\n";
     generateControlAxi(builder, args);
 
     // Add toplevel
-    builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
     debug(1) << "[Adding Toplevel]\n";
     generateToplevel(builder, name, args);
 
@@ -290,85 +295,94 @@ void CodeGen_CIRCT_Xilinx_Dev::add_kernel(Stmt stmt, const std::string &name, co
     currentKernelName = name;
 }
 
-void CodeGen_CIRCT_Xilinx_Dev::generateCalyxExtMemToAxi(mlir::ImplicitLocOpBuilder &builder) {
+void CodeGen_CIRCT_Xilinx_Dev::generateCalyxExtMemToAxi(mlir::ImplicitLocOpBuilder &topBuilder) {
     // AXI4 Manager signals
     mlir::SmallVector<circt::hw::PortInfo> axiSignals;
-    portsAddAXI4ManagerSignalsPrefix(builder, AXI_MANAGER_PREFIX, M_AXI_ADDR_WIDTH, M_AXI_DATA_WIDTH, axiSignals);
+    portsAddAXI4ManagerSignalsPrefix(topBuilder, AXI_MANAGER_PREFIX, M_AXI_ADDR_WIDTH, M_AXI_DATA_WIDTH, axiSignals);
     // Calyx external memory interface signals
     mlir::SmallVector<circt::hw::PortInfo> calyxExtMemSignals;
-    portsAddCalyxExtMemInterfaceSubordinateSignals(builder, M_AXI_ADDR_WIDTH, M_AXI_DATA_WIDTH, calyxExtMemSignals);
+    portsAddCalyxExtMemInterfaceSubordinateSignals(topBuilder, M_AXI_ADDR_WIDTH, M_AXI_DATA_WIDTH, calyxExtMemSignals);
 
-    mlir::SmallVector<mlir::Type> inputs, outputs;
-    mlir::SmallVector<mlir::Attribute> inputNames, outputNames;
+    // Module inputs and outputs
+    mlir::SmallVector<circt::hw::PortInfo> ports;
+
+    // Clock and reset signals
+    ports.push_back(circt::hw::PortInfo{topBuilder.getStringAttr("clock"), circt::hw::PortDirection::INPUT, topBuilder.getI1Type()});
+    ports.push_back(circt::hw::PortInfo{topBuilder.getStringAttr("reset"), circt::hw::PortDirection::INPUT, topBuilder.getI1Type()});
+
+    // AXI signals
+    ports.append(axiSignals);
+    // Calyx external memory interface signals
+    ports.append(calyxExtMemSignals);
+
+    // Create ControllerAXI HW module
+    circt::hw::HWModuleOp mod = topBuilder.create<circt::hw::HWModuleOp>(topBuilder.getStringAttr("CalyxExtMemToAxi"), ports);
+
+    // This will hold the list of all the output Values
+    mlir::SmallVector<mlir::Value> hwModuleOutputValues(mod.getNumResults());
+
+    // Create the FSM
+    mlir::SmallVector<mlir::Type> fsmInputs, fsmOutputs;
+    mlir::SmallVector<mlir::Attribute> fsmInputNames, fsmOutputNames;
 
     // First add AXI signals
-    for (const auto &signal : axiSignals) {
-        if (signal.direction == circt::hw::PortDirection::INPUT) {
-            inputs.push_back(signal.type);
-            inputNames.push_back(builder.getStringAttr(signal.name.str()));
-        } else {
-            outputs.push_back(signal.type);
-            outputNames.push_back(builder.getStringAttr(signal.name.str()));
-        }
+    static const mlir::SmallVector<std::string> fsmInputAxiSignalNames = {
+        "awready", "wready", "bvalid", "arready", "rvalid"};
+    for (const auto &name : fsmInputAxiSignalNames) {
+        fsmInputs.push_back(hwModuleGetAxiMInputValue(mod, name).getType());
+        fsmInputNames.push_back(topBuilder.getStringAttr(toFullAxiManagerSignalName(name)));
+    }
+    static const mlir::SmallVector<std::string> fsmOutputAxiSignalNames = {
+        "arvalid", "rready", "awvalid", "wvalid", "bready"};
+    for (const auto &name : fsmOutputAxiSignalNames) {
+        fsmOutputs.push_back(mod.getResultTypes()[hwModuleGetAxiMOutputIndex(mod, name)]);
+        fsmOutputNames.push_back(topBuilder.getStringAttr(toFullAxiManagerSignalName(name)));
     }
 
     // Then add Calyx external memory interface signals
-    for (const auto &signal : calyxExtMemSignals) {
-        if (signal.direction == circt::hw::PortDirection::INPUT) {
-            inputs.push_back(signal.type);
-            inputNames.push_back(builder.getStringAttr(signal.name.str()));
-        } else {
-            outputs.push_back(signal.type);
-            outputNames.push_back(builder.getStringAttr(signal.name.str()));
-        }
+    static const mlir::SmallVector<std::string> fsmInputCalyxExtMemSignalNames = {
+        "calyx_write_en", "calyx_read_en"};
+    for (const auto &name : fsmInputCalyxExtMemSignalNames) {
+        fsmInputs.push_back(hwModuleGetInputValue(mod, name).getType());
+        fsmInputNames.push_back(topBuilder.getStringAttr(name));
+    }
+    static const mlir::SmallVector<std::string> fsmOutputCalyxExtMemSignalNames = {
+        "calyx_done"};
+    for (const auto &name : fsmOutputCalyxExtMemSignalNames) {
+        fsmOutputs.push_back(mod.getResultTypes()[hwModuleGetOutputIndex(mod, name)]);
+        fsmOutputNames.push_back(topBuilder.getStringAttr(name));
     }
 
-    mlir::FunctionType fsmFunctionType = builder.getFunctionType(inputs, outputs);
-    circt::fsm::MachineOp machineOp = builder.create<circt::fsm::MachineOp>("CalyxExtMemToAxi", "IDLE", fsmFunctionType);
-    machineOp.setArgNamesAttr(builder.getArrayAttr(inputNames));
-    machineOp.setResNamesAttr(builder.getArrayAttr(outputNames));
-
+    mlir::FunctionType fsmFunctionType = topBuilder.getFunctionType(fsmInputs, fsmOutputs);
+    circt::fsm::MachineOp machineOp = topBuilder.create<circt::fsm::MachineOp>("CalyxExtMemToAxiFSM", "IDLE", fsmFunctionType);
+    mlir::SmallVector<mlir::Value> fsmOutputValues(machineOp.getNumResults());
+    machineOp.setArgNamesAttr(topBuilder.getArrayAttr(fsmInputNames));
+    machineOp.setResNamesAttr(topBuilder.getArrayAttr(fsmOutputNames));
     mlir::Region &fsmBody = machineOp.getBody();
     mlir::ImplicitLocOpBuilder fsmBuilder = mlir::ImplicitLocOpBuilder::atBlockEnd(fsmBody.getLoc(), &fsmBody.front());
 
-    mlir::Value value0 = fsmBuilder.create<circt::hw::ConstantOp>(fsmBuilder.getBoolAttr(false));
-    mlir::SmallVector<mlir::Value> outputValues(machineOp.getNumResults());
-
-    auto createAxiOutputConstantOp = [&](const std::string &name, int64_t value) {
+    auto fsmCreateAxiOutputConstantOp = [&](const std::string &name, int64_t value) {
         unsigned int idx = fsmGetAxiOutputIndex(machineOp, name);
         mlir::Type type = machineOp.getResultTypes()[idx];
-        return builder.create<circt::hw::ConstantOp>(type, value);
+        return fsmBuilder.create<circt::hw::ConstantOp>(type, value);
     };
 
-    auto setAxiOutputConstant = [&](const std::string &name, int64_t value) {
-        outputValues[fsmGetAxiOutputIndex(machineOp, name)] = createAxiOutputConstantOp(name, value);
+    auto fsmSetAxiOutputConstant = [&](const std::string &name, int64_t value) {
+        fsmOutputValues[fsmGetAxiOutputIndex(machineOp, name)] = fsmCreateAxiOutputConstantOp(name, value);
     };
 
-    // Constant outputs
-    setAxiOutputConstant("arlen", 0);   // 1 transfer
-    setAxiOutputConstant("awlen", 0);   // 1 transfer
-    setAxiOutputConstant("wstrb", -1);  // All bytes valid
-    setAxiOutputConstant("wlast", 1);   // Last transfer
-
-    auto addr0 = fsmGetInputValue(machineOp, "calyx_addr0");
-    outputValues[fsmGetAxiOutputIndex(machineOp, "araddr")] = addr0;
-    outputValues[fsmGetAxiOutputIndex(machineOp, "awaddr")] = addr0;
-    outputValues[fsmGetAxiOutputIndex(machineOp, "wdata")] = fsmGetInputValue(machineOp, "calyx_write_data");
-
-    // TODO
-    outputValues[fsmGetOutputIndex(machineOp, "calyx_read_data")] = fsmGetAxiInputValue(machineOp, "rdata");
-
+    mlir::Value value0 = fsmBuilder.create<circt::hw::ConstantOp>(fsmBuilder.getBoolAttr(false));
     size_t calyxDoneSignalIndex = fsmGetOutputIndex(machineOp, "calyx_done");
     {
         circt::fsm::StateOp idleState = fsmBuilder.create<circt::fsm::StateOp>("IDLE");
         {
-            setAxiOutputConstant("arvalid", 0);
-            setAxiOutputConstant("rready", 0);
-            setAxiOutputConstant("awvalid", 0);
-            setAxiOutputConstant("wvalid", 0);
-            setAxiOutputConstant("bready", 0);
-            outputValues[calyxDoneSignalIndex] = value0;
-            idleState.getOutputOp()->setOperands(outputValues);
+            fsmSetAxiOutputConstant("arvalid", 0);
+            fsmSetAxiOutputConstant("rready", 0);
+            fsmSetAxiOutputConstant("awvalid", 0);
+            fsmSetAxiOutputConstant("wvalid", 0);
+            fsmSetAxiOutputConstant("bready", 0);
+            fsmOutputValues[calyxDoneSignalIndex] = value0;
+            idleState.getOutputOp()->setOperands(fsmOutputValues);
         }
         mlir::Region &transitions = idleState.getTransitions();
         mlir::ImplicitLocOpBuilder transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
@@ -392,13 +406,13 @@ void CodeGen_CIRCT_Xilinx_Dev::generateCalyxExtMemToAxi(mlir::ImplicitLocOpBuild
     {
         circt::fsm::StateOp idleState = fsmBuilder.create<circt::fsm::StateOp>("AW_HANDSHAKE");
         {
-            setAxiOutputConstant("arvalid", 0);
-            setAxiOutputConstant("rready", 0);
-            setAxiOutputConstant("awvalid", 1);
-            setAxiOutputConstant("wvalid", 0);
-            setAxiOutputConstant("bready", 0);
-            outputValues[calyxDoneSignalIndex] = value0;
-            idleState.getOutputOp()->setOperands(outputValues);
+            fsmSetAxiOutputConstant("arvalid", 0);
+            fsmSetAxiOutputConstant("rready", 0);
+            fsmSetAxiOutputConstant("awvalid", 1);
+            fsmSetAxiOutputConstant("wvalid", 0);
+            fsmSetAxiOutputConstant("bready", 0);
+            fsmOutputValues[calyxDoneSignalIndex] = value0;
+            idleState.getOutputOp()->setOperands(fsmOutputValues);
         }
         mlir::Region &transitions = idleState.getTransitions();
         mlir::ImplicitLocOpBuilder transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
@@ -415,13 +429,13 @@ void CodeGen_CIRCT_Xilinx_Dev::generateCalyxExtMemToAxi(mlir::ImplicitLocOpBuild
     {
         circt::fsm::StateOp idleState = fsmBuilder.create<circt::fsm::StateOp>("W_HANDSHAKE");
         {
-            setAxiOutputConstant("arvalid", 0);
-            setAxiOutputConstant("rready", 0);
-            setAxiOutputConstant("awvalid", 0);
-            setAxiOutputConstant("wvalid", 1);
-            setAxiOutputConstant("bready", 0);
-            outputValues[calyxDoneSignalIndex] = value0;
-            idleState.getOutputOp()->setOperands(outputValues);
+            fsmSetAxiOutputConstant("arvalid", 0);
+            fsmSetAxiOutputConstant("rready", 0);
+            fsmSetAxiOutputConstant("awvalid", 0);
+            fsmSetAxiOutputConstant("wvalid", 1);
+            fsmSetAxiOutputConstant("bready", 0);
+            fsmOutputValues[calyxDoneSignalIndex] = value0;
+            idleState.getOutputOp()->setOperands(fsmOutputValues);
         }
         mlir::Region &transitions = idleState.getTransitions();
         mlir::ImplicitLocOpBuilder transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
@@ -438,13 +452,13 @@ void CodeGen_CIRCT_Xilinx_Dev::generateCalyxExtMemToAxi(mlir::ImplicitLocOpBuild
     {
         circt::fsm::StateOp idleState = fsmBuilder.create<circt::fsm::StateOp>("B_WAIT");
         {
-            setAxiOutputConstant("arvalid", 0);
-            setAxiOutputConstant("rready", 0);
-            setAxiOutputConstant("awvalid", 0);
-            setAxiOutputConstant("wvalid", 0);
-            setAxiOutputConstant("bready", 1);
-            outputValues[calyxDoneSignalIndex] = fsmGetAxiInputValue(machineOp, "bvalid");
-            idleState.getOutputOp()->setOperands(outputValues);
+            fsmSetAxiOutputConstant("arvalid", 0);
+            fsmSetAxiOutputConstant("rready", 0);
+            fsmSetAxiOutputConstant("awvalid", 0);
+            fsmSetAxiOutputConstant("wvalid", 0);
+            fsmSetAxiOutputConstant("bready", 1);
+            fsmOutputValues[calyxDoneSignalIndex] = fsmGetAxiInputValue(machineOp, "bvalid");
+            idleState.getOutputOp()->setOperands(fsmOutputValues);
         }
         mlir::Region &transitions = idleState.getTransitions();
         mlir::ImplicitLocOpBuilder transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
@@ -461,13 +475,13 @@ void CodeGen_CIRCT_Xilinx_Dev::generateCalyxExtMemToAxi(mlir::ImplicitLocOpBuild
     {
         circt::fsm::StateOp idleState = fsmBuilder.create<circt::fsm::StateOp>("AR_HANDSHAKE");
         {
-            setAxiOutputConstant("arvalid", 1);
-            setAxiOutputConstant("rready", 0);
-            setAxiOutputConstant("awvalid", 0);
-            setAxiOutputConstant("wvalid", 0);
-            setAxiOutputConstant("bready", 0);
-            outputValues[calyxDoneSignalIndex] = value0;
-            idleState.getOutputOp()->setOperands(outputValues);
+            fsmSetAxiOutputConstant("arvalid", 1);
+            fsmSetAxiOutputConstant("rready", 0);
+            fsmSetAxiOutputConstant("awvalid", 0);
+            fsmSetAxiOutputConstant("wvalid", 0);
+            fsmSetAxiOutputConstant("bready", 0);
+            fsmOutputValues[calyxDoneSignalIndex] = value0;
+            idleState.getOutputOp()->setOperands(fsmOutputValues);
         }
         mlir::Region &transitions = idleState.getTransitions();
         mlir::ImplicitLocOpBuilder transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
@@ -484,13 +498,13 @@ void CodeGen_CIRCT_Xilinx_Dev::generateCalyxExtMemToAxi(mlir::ImplicitLocOpBuild
     {
         circt::fsm::StateOp idleState = fsmBuilder.create<circt::fsm::StateOp>("R_HANDSHAKE");
         {
-            setAxiOutputConstant("arvalid", 0);
-            setAxiOutputConstant("rready", 1);
-            setAxiOutputConstant("awvalid", 0);
-            setAxiOutputConstant("wvalid", 0);
-            setAxiOutputConstant("bready", 0);
-            outputValues[calyxDoneSignalIndex] = fsmGetAxiInputValue(machineOp, "rvalid");
-            idleState.getOutputOp()->setOperands(outputValues);
+            fsmSetAxiOutputConstant("arvalid", 0);
+            fsmSetAxiOutputConstant("rready", 1);
+            fsmSetAxiOutputConstant("awvalid", 0);
+            fsmSetAxiOutputConstant("wvalid", 0);
+            fsmSetAxiOutputConstant("bready", 0);
+            fsmOutputValues[calyxDoneSignalIndex] = fsmGetAxiInputValue(machineOp, "rvalid");
+            idleState.getOutputOp()->setOperands(fsmOutputValues);
         }
         mlir::Region &transitions = idleState.getTransitions();
         mlir::ImplicitLocOpBuilder transitionsBuilder = mlir::ImplicitLocOpBuilder::atBlockBegin(transitions.getLoc(), &transitions.front());
@@ -503,35 +517,89 @@ void CodeGen_CIRCT_Xilinx_Dev::generateCalyxExtMemToAxi(mlir::ImplicitLocOpBuild
             }
         }
     }
+
+    // Start implementing the module
+    mlir::Region &modBody = mod.getBody();
+    mlir::ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockBegin(modBody.getLoc(), &modBody.front());
+
+    // FSM inputs
+    mlir::SmallVector<mlir::Value> fsmInputValues;
+    for (const auto &name : fsmInputAxiSignalNames)
+        fsmInputValues.push_back(hwModuleGetAxiMInputValue(mod, name));
+    for (const auto &name : fsmInputCalyxExtMemSignalNames)
+        fsmInputValues.push_back(hwModuleGetInputValue(mod, name));
+
+    // Instantiate the FSM
+    auto fsmOp =
+        builder.create<circt::fsm::HWInstanceOp>(machineOp.getFunctionType().getResults(),
+                                                 "calyx_ext_mem_to_axi_fsm", machineOp.getSymName(),
+                                                 fsmInputValues,
+                                                 hwModuleGetInputValue(mod, "clock"),
+                                                 hwModuleGetInputValue(mod, "reset"));
+
+    // FSM outputs
+    int outputIndex = 0;
+    for (const auto &name : fsmOutputAxiSignalNames)
+        hwModuleOutputValues[hwModuleGetAxiMOutputIndex(mod, name)] = fsmOp.getResult(outputIndex++);
+    for (const auto &name : fsmOutputCalyxExtMemSignalNames)
+        hwModuleOutputValues[hwModuleGetOutputIndex(mod, name)] = fsmOp.getResult(outputIndex++);
+
+    // Constant outputs
+    auto hwModCreateAxiOutputConstantOp = [&](const std::string &name, int64_t value) {
+        unsigned int idx = hwModuleGetAxiMOutputIndex(mod, name);
+        mlir::Type type = mod.getResultTypes()[idx];
+        return builder.create<circt::hw::ConstantOp>(type, value);
+    };
+
+    auto hwModSetAxiOutputConstant = [&](const std::string &name, int64_t value) {
+        hwModuleOutputValues[hwModuleGetAxiMOutputIndex(mod, name)] = hwModCreateAxiOutputConstantOp(name, value);
+    };
+
+    hwModSetAxiOutputConstant("arlen", 0);   // 1 transfer
+    hwModSetAxiOutputConstant("awlen", 0);   // 1 transfer
+    hwModSetAxiOutputConstant("wstrb", -1);  // All bytes valid
+    hwModSetAxiOutputConstant("wlast", 1);   // Last transfer
+
+    auto addr0 = hwModuleGetInputValue(mod, "calyx_addr0");
+    hwModuleOutputValues[hwModuleGetAxiMOutputIndex(mod, "araddr")] = addr0;
+    hwModuleOutputValues[hwModuleGetAxiMOutputIndex(mod, "awaddr")] = addr0;
+    hwModuleOutputValues[hwModuleGetAxiMOutputIndex(mod, "wdata")] = hwModuleGetInputValue(mod, "calyx_write_data");
+
+    // TODO
+    hwModuleOutputValues[hwModuleGetOutputIndex(mod, "calyx_read_data")] = hwModuleGetAxiMInputValue(mod, "rdata");
+
+    // Set module output operands
+    auto outputOp = mod.getBodyBlock()->getTerminator();
+    outputOp->setOperands(hwModuleOutputValues);
 }
 
-void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &builder, const std::vector<DeviceArgument> &kernelArgs) {
-    mlir::Type axiAddrWidthType = builder.getIntegerType(S_AXI_ADDR_WIDTH);
-    mlir::Type axiDataWidthType = builder.getIntegerType(S_AXI_DATA_WIDTH);
+void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &topBuilder, const std::vector<DeviceArgument> &kernelArgs) {
+    mlir::Type axiAddrWidthType = topBuilder.getIntegerType(S_AXI_ADDR_WIDTH);
+    mlir::Type axiDataWidthType = topBuilder.getIntegerType(S_AXI_DATA_WIDTH);
 
     // Module inputs and outputs
     mlir::SmallVector<circt::hw::PortInfo> ports;
 
     // Clock and reset signals
-    ports.push_back(circt::hw::PortInfo{builder.getStringAttr("clock"), circt::hw::PortDirection::INPUT, builder.getI1Type()});
-    ports.push_back(circt::hw::PortInfo{builder.getStringAttr("reset"), circt::hw::PortDirection::INPUT, builder.getI1Type()});
+    ports.push_back(circt::hw::PortInfo{topBuilder.getStringAttr("clock"), circt::hw::PortDirection::INPUT, topBuilder.getI1Type()});
+    ports.push_back(circt::hw::PortInfo{topBuilder.getStringAttr("reset"), circt::hw::PortDirection::INPUT, topBuilder.getI1Type()});
 
     // ap_start and ap_done
-    ports.push_back(circt::hw::PortInfo{builder.getStringAttr("ap_start"), circt::hw::PortDirection::OUTPUT, builder.getI1Type()});
-    ports.push_back(circt::hw::PortInfo{builder.getStringAttr("ap_done"), circt::hw::PortDirection::INPUT, builder.getI1Type()});
+    ports.push_back(circt::hw::PortInfo{topBuilder.getStringAttr("ap_start"), circt::hw::PortDirection::OUTPUT, topBuilder.getI1Type()});
+    ports.push_back(circt::hw::PortInfo{topBuilder.getStringAttr("ap_done"), circt::hw::PortDirection::INPUT, topBuilder.getI1Type()});
 
     // AXI signals
-    portsAddAXI4LiteSubordinateSignals(builder, S_AXI_ADDR_WIDTH, S_AXI_DATA_WIDTH, ports);
+    portsAddAXI4LiteSubordinateSignals(topBuilder, S_AXI_ADDR_WIDTH, S_AXI_DATA_WIDTH, ports);
 
     // Kernel arguments
     for (const auto &arg : kernelArgs) {
-        ports.push_back(circt::hw::PortInfo{builder.getStringAttr(arg.name),
+        ports.push_back(circt::hw::PortInfo{topBuilder.getStringAttr(arg.name),
                                             circt::hw::PortDirection::OUTPUT,
-                                            builder.getIntegerType(argGetHWBits(arg))});
+                                            topBuilder.getIntegerType(argGetHWBits(arg))});
     }
 
     // Create ControllerAXI HW module
-    circt::hw::HWModuleOp mod = builder.create<circt::hw::HWModuleOp>(builder.getStringAttr("ControlAXI"), ports);
+    circt::hw::HWModuleOp mod = topBuilder.create<circt::hw::HWModuleOp>(topBuilder.getStringAttr("ControlAXI"), ports);
 
     // This will hold the list of all the output Values
     mlir::SmallVector<mlir::Value> hwModuleOutputValues(mod.getNumResults());
@@ -541,11 +609,11 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &bu
 
     // ReadState FSM
     mlir::SmallVector<std::pair<std::string, mlir::Value>> readStateFsmInputs{
-        {"arvalid", hwModuleGetAxiInputValue(mod, "arvalid")},
-        {"rready", hwModuleGetAxiInputValue(mod, "rready")}};
+        {"arvalid", hwModuleGetAxiSInputValue(mod, "arvalid")},
+        {"rready", hwModuleGetAxiSInputValue(mod, "rready")}};
     mlir::SmallVector<std::pair<std::string, unsigned int>> readStateFsmOutputs{
-        {"arready", hwModuleGetAxiOutputIndex(mod, "arready")},
-        {"rvalid", hwModuleGetAxiOutputIndex(mod, "rvalid")}};
+        {"arready", hwModuleGetAxiSOutputIndex(mod, "arready")},
+        {"rvalid", hwModuleGetAxiSOutputIndex(mod, "rvalid")}};
     mlir::SmallVector<mlir::Value> readStateFsmInputValues;
     mlir::SmallVector<mlir::Type> readStateFsmOutputTypes;
     circt::fsm::MachineOp readFsmMachineOp;
@@ -556,24 +624,24 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &bu
         for (const auto &input : readStateFsmInputs) {
             fsmInputTypes.push_back(input.second.getType());
             readStateFsmInputValues.push_back(input.second);
-            fsmInputNames.push_back(builder.getStringAttr(toFullAxiSubordinateSignalName(input.first)));
+            fsmInputNames.push_back(topBuilder.getStringAttr(toFullAxiSubordinateSignalName(input.first)));
         }
 
         for (const auto &output : readStateFsmOutputs) {
             readStateFsmOutputTypes.push_back(mod.getResultTypes()[output.second]);
-            fsmOutputNames.push_back(builder.getStringAttr(toFullAxiSubordinateSignalName(output.first)));
+            fsmOutputNames.push_back(topBuilder.getStringAttr(toFullAxiSubordinateSignalName(output.first)));
         }
 
-        mlir::FunctionType fsmFunctionType = builder.getFunctionType(fsmInputTypes, readStateFsmOutputTypes);
-        readFsmMachineOp = builder.create<circt::fsm::MachineOp>("ControlAXI_ReadFSM", "IDLE", fsmFunctionType);
-        readFsmMachineOp.setArgNamesAttr(builder.getArrayAttr(fsmInputNames));
-        readFsmMachineOp.setResNamesAttr(builder.getArrayAttr(fsmOutputNames));
+        mlir::FunctionType fsmFunctionType = topBuilder.getFunctionType(fsmInputTypes, readStateFsmOutputTypes);
+        readFsmMachineOp = topBuilder.create<circt::fsm::MachineOp>("ControlAXI_ReadFSM", "IDLE", fsmFunctionType);
+        readFsmMachineOp.setArgNamesAttr(topBuilder.getArrayAttr(fsmInputNames));
+        readFsmMachineOp.setResNamesAttr(topBuilder.getArrayAttr(fsmOutputNames));
         mlir::SmallVector<mlir::Value> fsmOutputValues(readFsmMachineOp.getNumResults());
 
         auto &fsmBody = readFsmMachineOp.getBody();
         auto fsmBuilder = mlir::ImplicitLocOpBuilder::atBlockEnd(fsmBody.getLoc(), &fsmBody.front());
-        mlir::Value value0 = fsmBuilder.create<circt::hw::ConstantOp>(builder.getBoolAttr(false));
-        mlir::Value value1 = fsmBuilder.create<circt::hw::ConstantOp>(builder.getBoolAttr(true));
+        mlir::Value value0 = fsmBuilder.create<circt::hw::ConstantOp>(fsmBuilder.getBoolAttr(false));
+        mlir::Value value1 = fsmBuilder.create<circt::hw::ConstantOp>(fsmBuilder.getBoolAttr(true));
         {
             auto state = fsmBuilder.create<circt::fsm::StateOp>("IDLE");
             {
@@ -608,13 +676,13 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &bu
 
     // WriteState FSM
     mlir::SmallVector<std::pair<std::string, mlir::Value>> writeStateFsmInputs{
-        {"awvalid", hwModuleGetAxiInputValue(mod, "awvalid")},
-        {"wvalid", hwModuleGetAxiInputValue(mod, "wvalid")},
-        {"bready", hwModuleGetAxiInputValue(mod, "bready")}};
+        {"awvalid", hwModuleGetAxiSInputValue(mod, "awvalid")},
+        {"wvalid", hwModuleGetAxiSInputValue(mod, "wvalid")},
+        {"bready", hwModuleGetAxiSInputValue(mod, "bready")}};
     mlir::SmallVector<std::pair<std::string, unsigned int>> writeStateFsmOutputs{
-        {"awready", hwModuleGetAxiOutputIndex(mod, "awready")},
-        {"wready", hwModuleGetAxiOutputIndex(mod, "wready")},
-        {"bvalid", hwModuleGetAxiOutputIndex(mod, "bvalid")}};
+        {"awready", hwModuleGetAxiSOutputIndex(mod, "awready")},
+        {"wready", hwModuleGetAxiSOutputIndex(mod, "wready")},
+        {"bvalid", hwModuleGetAxiSOutputIndex(mod, "bvalid")}};
     mlir::SmallVector<mlir::Value> writeStateFsmInputValues;
     mlir::SmallVector<mlir::Type> writeStateFsmOutputTypes;
     circt::fsm::MachineOp writeFsmMachineOp;
@@ -625,24 +693,24 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &bu
         for (const auto &input : writeStateFsmInputs) {
             fsmInputTypes.push_back(input.second.getType());
             writeStateFsmInputValues.push_back(input.second);
-            fsmInputNames.push_back(builder.getStringAttr(toFullAxiSubordinateSignalName(input.first)));
+            fsmInputNames.push_back(topBuilder.getStringAttr(toFullAxiSubordinateSignalName(input.first)));
         }
 
         for (const auto &output : writeStateFsmOutputs) {
             writeStateFsmOutputTypes.push_back(mod.getResultTypes()[output.second]);
-            fsmOutputNames.push_back(builder.getStringAttr(toFullAxiSubordinateSignalName(output.first)));
+            fsmOutputNames.push_back(topBuilder.getStringAttr(toFullAxiSubordinateSignalName(output.first)));
         }
 
-        mlir::FunctionType fsmFunctionType = builder.getFunctionType(fsmInputTypes, writeStateFsmOutputTypes);
-        writeFsmMachineOp = builder.create<circt::fsm::MachineOp>("ControlAXI_WriteFSM", "IDLE", fsmFunctionType);
-        writeFsmMachineOp.setArgNamesAttr(builder.getArrayAttr(fsmInputNames));
-        writeFsmMachineOp.setResNamesAttr(builder.getArrayAttr(fsmOutputNames));
+        mlir::FunctionType fsmFunctionType = topBuilder.getFunctionType(fsmInputTypes, writeStateFsmOutputTypes);
+        writeFsmMachineOp = topBuilder.create<circt::fsm::MachineOp>("ControlAXI_WriteFSM", "IDLE", fsmFunctionType);
+        writeFsmMachineOp.setArgNamesAttr(topBuilder.getArrayAttr(fsmInputNames));
+        writeFsmMachineOp.setResNamesAttr(topBuilder.getArrayAttr(fsmOutputNames));
         mlir::SmallVector<mlir::Value> fsmOutputValues(writeFsmMachineOp.getNumResults());
 
         auto &fsmBody = writeFsmMachineOp.getBody();
         auto fsmBuilder = mlir::ImplicitLocOpBuilder::atBlockEnd(fsmBody.getLoc(), &fsmBody.front());
-        mlir::Value value0 = fsmBuilder.create<circt::hw::ConstantOp>(builder.getBoolAttr(false));
-        mlir::Value value1 = fsmBuilder.create<circt::hw::ConstantOp>(builder.getBoolAttr(true));
+        mlir::Value value0 = fsmBuilder.create<circt::hw::ConstantOp>(fsmBuilder.getBoolAttr(false));
+        mlir::Value value1 = fsmBuilder.create<circt::hw::ConstantOp>(fsmBuilder.getBoolAttr(true));
         {
             auto state = fsmBuilder.create<circt::fsm::StateOp>("IDLE");
             {
@@ -693,8 +761,11 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &bu
         }
     }
 
+    // Start implementing the module
+    mlir::Region &modBody = mod.getBody();
+    mlir::ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockBegin(modBody.getLoc(), &modBody.front());
+
     // Instantiate FSMs
-    builder.setInsertionPointToStart(mod.getBodyBlock());
     mlir::Value value0 = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(false));
     mlir::Value value1 = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(true));
 
@@ -703,7 +774,7 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &bu
                                                  readStateFsmInputValues, clock, reset);
 
     for (unsigned int i = 0; i < readFsmInstanceOp.getNumResults(); i++)
-        hwModuleOutputValues[hwModuleGetAxiOutputIndex(mod, readStateFsmOutputs[i].first)] =
+        hwModuleOutputValues[hwModuleGetAxiSOutputIndex(mod, readStateFsmOutputs[i].first)] =
             readFsmInstanceOp.getResult(i);
 
     auto writeFsmInstanceOp =
@@ -711,33 +782,33 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &bu
                                                  writeStateFsmInputValues, clock, reset);
 
     for (unsigned int i = 0; i < writeFsmMachineOp.getNumResults(); i++)
-        hwModuleOutputValues[hwModuleGetAxiOutputIndex(mod, writeStateFsmOutputs[i].first)] =
+        hwModuleOutputValues[hwModuleGetAxiSOutputIndex(mod, writeStateFsmOutputs[i].first)] =
             writeFsmInstanceOp.getResult(i);
 
     // ControlAXI logic
-    hwModuleOutputValues[hwModuleGetAxiOutputIndex(mod, "rresp")] = builder.create<circt::hw::ConstantOp>(builder.getI2Type(), 0);
-    hwModuleOutputValues[hwModuleGetAxiOutputIndex(mod, "bresp")] = builder.create<circt::hw::ConstantOp>(builder.getI2Type(), 0);
+    hwModuleOutputValues[hwModuleGetAxiSOutputIndex(mod, "rresp")] = builder.create<circt::hw::ConstantOp>(builder.getI2Type(), 0);
+    hwModuleOutputValues[hwModuleGetAxiSOutputIndex(mod, "bresp")] = builder.create<circt::hw::ConstantOp>(builder.getI2Type(), 0);
 
     // Write address. Store it into a register
     mlir::Value awaddr_next = builder.create<circt::sv::LogicOp>(axiAddrWidthType, "awaddr_next");
     mlir::Value awaddr_next_read = builder.create<circt::sv::ReadInOutOp>(awaddr_next);
     mlir::Value awaddr_reg = builder.create<circt::seq::CompRegOp>(awaddr_next_read, clock, reset,
                                                                    builder.create<circt::hw::ConstantOp>(axiAddrWidthType, 0), "awaddr_reg");
-    mlir::Value writeToAwaddrReg = builder.create<circt::comb::AndOp>(hwModuleGetAxiInputValue(mod, "awvalid"),
-                                                                      hwModuleOutputValues[hwModuleGetAxiOutputIndex(mod, "awready")]);
+    mlir::Value writeToAwaddrReg = builder.create<circt::comb::AndOp>(hwModuleGetAxiSInputValue(mod, "awvalid"),
+                                                                      hwModuleOutputValues[hwModuleGetAxiSOutputIndex(mod, "awready")]);
     builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
         builder.create<circt::sv::IfOp>(
             writeToAwaddrReg,
-            /*thenCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(awaddr_next, hwModuleGetAxiInputValue(mod, "awaddr")); },
+            /*thenCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(awaddr_next, hwModuleGetAxiSInputValue(mod, "awaddr")); },
             /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(awaddr_next, awaddr_reg); });
     });
 
-    const mlir::Value isWriteValidReady = builder.create<circt::comb::AndOp>(hwModuleGetAxiInputValue(mod, "wvalid"),
-                                                                             hwModuleOutputValues[hwModuleGetAxiOutputIndex(mod, "wready")]);
-    const mlir::Value isAreadValidReady = builder.create<circt::comb::AndOp>(hwModuleGetAxiInputValue(mod, "arvalid"),
-                                                                             hwModuleOutputValues[hwModuleGetAxiOutputIndex(mod, "arready")]);
-    const mlir::Value isReadValidReady = builder.create<circt::comb::AndOp>(hwModuleGetAxiInputValue(mod, "rready"),
-                                                                            hwModuleOutputValues[hwModuleGetAxiOutputIndex(mod, "rvalid")]);
+    const mlir::Value isWriteValidReady = builder.create<circt::comb::AndOp>(hwModuleGetAxiSInputValue(mod, "wvalid"),
+                                                                             hwModuleOutputValues[hwModuleGetAxiSOutputIndex(mod, "wready")]);
+    const mlir::Value isAreadValidReady = builder.create<circt::comb::AndOp>(hwModuleGetAxiSInputValue(mod, "arvalid"),
+                                                                             hwModuleOutputValues[hwModuleGetAxiSOutputIndex(mod, "arready")]);
+    const mlir::Value isReadValidReady = builder.create<circt::comb::AndOp>(hwModuleGetAxiSInputValue(mod, "rready"),
+                                                                            hwModuleOutputValues[hwModuleGetAxiSOutputIndex(mod, "rvalid")]);
     // Control Register Signals (offset 0x00)
     mlir::Value int_ap_start_next = builder.create<circt::sv::LogicOp>(builder.getI1Type(), "int_ap_start_next");
     mlir::Value int_ap_start_next_read = builder.create<circt::sv::ReadInOutOp>(int_ap_start_next);
@@ -750,7 +821,7 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &bu
         builder.create<circt::sv::IfOp>(
             builder.create<circt::comb::AndOp>(isWriteValidReady, isWaddr0x00),
             /*thenCtor*/ [&]() {
-                mlir::Value apStartBit = builder.create<circt::comb::ExtractOp>(hwModuleGetAxiInputValue(mod, "wdata"), 0, 1);
+                mlir::Value apStartBit = builder.create<circt::comb::ExtractOp>(hwModuleGetAxiSInputValue(mod, "wdata"), 0, 1);
                 builder.create<circt::sv::BPAssignOp>(int_ap_start_next, apStartBit); },
             /*elseCtor*/ [&]() { builder.create<circt::sv::IfOp>(
                                      hwModuleGetInputValue(mod, "ap_done"),
@@ -762,7 +833,7 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &bu
     mlir::Value int_ap_done_next_read = builder.create<circt::sv::ReadInOutOp>(int_ap_done_next);
     mlir::Value int_ap_done = builder.create<circt::seq::CompRegOp>(int_ap_done_next_read, clock, reset, value0, "int_ap_done_reg");
     mlir::Value isRaddr0x00 = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq,
-                                                                  hwModuleGetAxiInputValue(mod, "araddr"),
+                                                                  hwModuleGetAxiSInputValue(mod, "araddr"),
                                                                   builder.create<circt::hw::ConstantOp>(axiAddrWidthType, 0));
 
     builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
@@ -799,7 +870,7 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &bu
         builder.create<circt::sv::IfOp>(
             builder.create<circt::comb::AndOp>(isWriteValidReady, isWaddr0x04),
             /*thenCtor*/ [&]() {
-                mlir::Value gieBit = builder.create<circt::comb::ExtractOp>(hwModuleGetAxiInputValue(mod, "wdata"), 0, 1);
+                mlir::Value gieBit = builder.create<circt::comb::ExtractOp>(hwModuleGetAxiSInputValue(mod, "wdata"), 0, 1);
                 builder.create<circt::sv::BPAssignOp>(int_gie_next, gieBit); },
             /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_gie_next, int_gie); });
     });
@@ -816,7 +887,7 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &bu
         builder.create<circt::sv::IfOp>(
             builder.create<circt::comb::AndOp>(isWriteValidReady, isWaddr0x08),
             /*thenCtor*/ [&]() {
-                mlir::Value ierBits = builder.create<circt::comb::ExtractOp>(hwModuleGetAxiInputValue(mod, "wdata"), 0, 2);
+                mlir::Value ierBits = builder.create<circt::comb::ExtractOp>(hwModuleGetAxiSInputValue(mod, "wdata"), 0, 2);
                 builder.create<circt::sv::BPAssignOp>(int_ier_next, ierBits); },
             /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ier_next, int_ier); });
     });
@@ -834,8 +905,8 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &bu
         builder.create<circt::sv::IfOp>(
             builder.create<circt::comb::AndOp>(isWriteValidReady, isWaddr0x0C),
             /*thenCtor*/ [&]() {
-                mlir::Value isrDoneBit = builder.create<circt::comb::ExtractOp>(hwModuleGetAxiInputValue(mod, "wdata"), 0, 1);
-                mlir::Value isrReadyBit = builder.create<circt::comb::ExtractOp>(hwModuleGetAxiInputValue(mod, "wdata"), 1, 1);
+                mlir::Value isrDoneBit = builder.create<circt::comb::ExtractOp>(hwModuleGetAxiSInputValue(mod, "wdata"), 0, 1);
+                mlir::Value isrReadyBit = builder.create<circt::comb::ExtractOp>(hwModuleGetAxiSInputValue(mod, "wdata"), 1, 1);
                 builder.create<circt::sv::BPAssignOp>(int_isr_done_next, isrDoneBit);
                 builder.create<circt::sv::BPAssignOp>(int_isr_ready_next, isrReadyBit); },
             /*elseCtor*/ [&]() {
@@ -863,7 +934,7 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &bu
             builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
                 builder.create<circt::sv::IfOp>(
                     builder.create<circt::comb::AndOp>(isWriteValidReady, isWaddrToSubArgAddr),
-                    /*thenCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(bitsToUpdate, hwModuleGetAxiInputValue(mod, "wdata")); },
+                    /*thenCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(bitsToUpdate, hwModuleGetAxiSInputValue(mod, "wdata")); },
                     /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(bitsToUpdate,
                                                                                builder.create<circt::sv::IndexedPartSelectOp>(argReg, startBit, 32)); });
             });
@@ -881,7 +952,7 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &bu
     mlir::Value rdata = builder.create<circt::seq::CompRegOp>(rdata_next_read, clock, reset,
                                                               builder.create<circt::hw::ConstantOp>(axiDataWidthType, 0),
                                                               "rdata_reg");
-    hwModuleOutputValues[hwModuleGetAxiOutputIndex(mod, "rdata")] = rdata;
+    hwModuleOutputValues[hwModuleGetAxiSOutputIndex(mod, "rdata")] = rdata;
 
     // XRT registers + number of kernel arguments (each is considered to be have 8 bytes)
     const size_t numCases = XRT_KERNEL_ARGS_OFFSET / 4 + kernelArgs.size() * 2;
@@ -890,7 +961,7 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &bu
         builder.create<circt::sv::IfOp>(
             isAreadValidReady,
             /*thenCtor*/ [&]() {
-                mlir::Value index = builder.create<circt::comb::ExtractOp>(hwModuleGetAxiInputValue(mod, "araddr"), 0, 12);
+                mlir::Value index = builder.create<circt::comb::ExtractOp>(hwModuleGetAxiSInputValue(mod, "araddr"), 0, 12);
                 builder.create<circt::sv::CaseOp>(
                     CaseStmtType::CaseStmt, index, numCases + 1,
                     [&](size_t caseIdx) -> std::unique_ptr<circt::sv::CasePattern> {
@@ -947,18 +1018,18 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &bu
     outputOp->setOperands(hwModuleOutputValues);
 }
 
-void CodeGen_CIRCT_Xilinx_Dev::generateToplevel(mlir::ImplicitLocOpBuilder &builder, const std::string &kernelName,
+void CodeGen_CIRCT_Xilinx_Dev::generateToplevel(mlir::ImplicitLocOpBuilder &topBuilder, const std::string &kernelName,
                                                 const std::vector<DeviceArgument> &kernelArgs) {
     // Module inputs and outputs
     mlir::SmallVector<circt::hw::PortInfo> ports;
 
     // Clock and reset signals
-    ports.push_back(circt::hw::PortInfo{builder.getStringAttr("ap_clk"), circt::hw::PortDirection::INPUT, builder.getI1Type()});
-    ports.push_back(circt::hw::PortInfo{builder.getStringAttr("ap_rst_n"), circt::hw::PortDirection::INPUT, builder.getI1Type()});
+    ports.push_back(circt::hw::PortInfo{topBuilder.getStringAttr("ap_clk"), circt::hw::PortDirection::INPUT, topBuilder.getI1Type()});
+    ports.push_back(circt::hw::PortInfo{topBuilder.getStringAttr("ap_rst_n"), circt::hw::PortDirection::INPUT, topBuilder.getI1Type()});
 
     // AXI4 lite subordinate control signals
     mlir::SmallVector<circt::hw::PortInfo> axi4LiteSubordinateSignals;
-    portsAddAXI4LiteSubordinateSignals(builder, S_AXI_ADDR_WIDTH, S_AXI_DATA_WIDTH, axi4LiteSubordinateSignals);
+    portsAddAXI4LiteSubordinateSignals(topBuilder, S_AXI_ADDR_WIDTH, S_AXI_DATA_WIDTH, axi4LiteSubordinateSignals);
     ports.append(axi4LiteSubordinateSignals);
 
     // AXI4 manager control signals
@@ -966,29 +1037,30 @@ void CodeGen_CIRCT_Xilinx_Dev::generateToplevel(mlir::ImplicitLocOpBuilder &buil
 
     // Calyx external memory interface signals
     mlir::SmallVector<circt::hw::PortInfo> calyxExtMemSignals;
-    portsAddCalyxExtMemInterfaceSubordinateSignals(builder, M_AXI_ADDR_WIDTH, M_AXI_DATA_WIDTH, calyxExtMemSignals);
+    portsAddCalyxExtMemInterfaceSubordinateSignals(topBuilder, M_AXI_ADDR_WIDTH, M_AXI_DATA_WIDTH, calyxExtMemSignals);
 
     // Signals for CalyxExtMemToAxi for each kernel buffer argument
     unsigned numBufferArgs = 0;
     for (unsigned i = 0; i < kernelArgs.size(); i++) {
         if (kernelArgs[i].is_buffer) {
             mlir::SmallVector<circt::hw::PortInfo> signals;
-            portsAddAXI4ManagerSignalsPrefix(builder, getAxiManagerSignalNamePrefixId(numBufferArgs) + "_",
+            portsAddAXI4ManagerSignalsPrefix(topBuilder, getAxiManagerSignalNamePrefixId(numBufferArgs) + "_",
                                              M_AXI_ADDR_WIDTH, M_AXI_DATA_WIDTH, signals);
             axi4ManagerSignals.push_back(signals);
             ports.append(signals);
             // Connected directly to the AXI interface
-            ports.push_back(circt::hw::PortInfo{builder.getStringAttr(toFullAxiManagerSignalNameId(numBufferArgs, "arsize")),
-                                                circt::hw::PortDirection::OUTPUT, builder.getIntegerType(3)});
-            ports.push_back(circt::hw::PortInfo{builder.getStringAttr(toFullAxiManagerSignalNameId(numBufferArgs, "awsize")),
-                                                circt::hw::PortDirection::OUTPUT, builder.getIntegerType(3)});
+            ports.push_back(circt::hw::PortInfo{topBuilder.getStringAttr(toFullAxiManagerSignalNameId(numBufferArgs, "arsize")),
+                                                circt::hw::PortDirection::OUTPUT, topBuilder.getIntegerType(3)});
+            ports.push_back(circt::hw::PortInfo{topBuilder.getStringAttr(toFullAxiManagerSignalNameId(numBufferArgs, "awsize")),
+                                                circt::hw::PortDirection::OUTPUT, topBuilder.getIntegerType(3)});
             numBufferArgs++;
         }
     }
 
     // Create toplevel HW module
-    circt::hw::HWModuleOp mod = builder.create<circt::hw::HWModuleOp>(builder.getStringAttr("toplevel"), ports);
-    builder.setInsertionPointToStart(mod.getBodyBlock());
+    circt::hw::HWModuleOp mod = topBuilder.create<circt::hw::HWModuleOp>(topBuilder.getStringAttr("toplevel"), ports);
+    mlir::Region &modBody = mod.getBody();
+    mlir::ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockBegin(modBody.getLoc(), &modBody.front());
 
     // This will hold the list of all the output Values
     mlir::SmallVector<mlir::Value> hwModuleOutputWires(mod.getNumResults());
@@ -1042,6 +1114,11 @@ void CodeGen_CIRCT_Xilinx_Dev::generateToplevel(mlir::ImplicitLocOpBuilder &buil
         mlir::SmallVector<mlir::Type> CalyxExtMemToAxiResultTypes;
         mlir::SmallVector<mlir::Attribute> CalyxExtMemToAxiArgNames, CalyxExtMemToAxiResultNames;
 
+        CalyxExtMemToAxiInputs.push_back(clock);
+        CalyxExtMemToAxiArgNames.push_back(builder.getStringAttr("clock"));
+        CalyxExtMemToAxiInputs.push_back(resetOrApDone);
+        CalyxExtMemToAxiArgNames.push_back(builder.getStringAttr("reset"));
+
         for (const auto &signal : axi4ManagerSignals[i]) {
             std::string basename = fullAxiSignalNameIdGetBasename(signal.name.str());
             mlir::StringAttr nameAttr = builder.getStringAttr(toFullAxiManagerSignalName(basename));
@@ -1066,11 +1143,6 @@ void CodeGen_CIRCT_Xilinx_Dev::generateToplevel(mlir::ImplicitLocOpBuilder &buil
                 CalyxExtMemToAxiResultNames.push_back(signal.name);
             }
         }
-
-        CalyxExtMemToAxiInputs.push_back(clock);
-        CalyxExtMemToAxiArgNames.push_back(builder.getStringAttr("clk"));
-        CalyxExtMemToAxiInputs.push_back(resetOrApDone);
-        CalyxExtMemToAxiArgNames.push_back(builder.getStringAttr("rst"));
 
         mlir::StringAttr nameAttr = builder.getStringAttr("calyx_ext_mem_to_axi_" + std::to_string(i));
         CalyxExtMemToAxiInstances[i] =
