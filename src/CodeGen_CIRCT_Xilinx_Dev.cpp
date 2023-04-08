@@ -614,9 +614,10 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &to
     // Module inputs and outputs
     mlir::SmallVector<circt::hw::PortInfo> ports;
 
-    // Clock and reset signals
+    // Clock, reset and interrupt signals
     ports.push_back(circt::hw::PortInfo{topBuilder.getStringAttr("clock"), circt::hw::PortDirection::INPUT, topBuilder.getI1Type()});
     ports.push_back(circt::hw::PortInfo{topBuilder.getStringAttr("reset"), circt::hw::PortDirection::INPUT, topBuilder.getI1Type()});
+    ports.push_back(circt::hw::PortInfo{topBuilder.getStringAttr("interrupt"), circt::hw::PortDirection::OUTPUT, topBuilder.getI1Type()});
 
     // ap_start and ap_done
     ports.push_back(circt::hw::PortInfo{topBuilder.getStringAttr("ap_start"), circt::hw::PortDirection::OUTPUT, topBuilder.getI1Type()});
@@ -799,10 +800,13 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &to
     mlir::Region &modBody = mod.getBody();
     mlir::ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockBegin(modBody.getLoc(), &modBody.front());
 
-    // Instantiate FSMs
     mlir::Value value0 = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(false));
     mlir::Value value1 = builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(true));
 
+    // Not yet supported, for pipelined execution model (ap_ctrl_chain)
+    mlir::Value apReady = value0;
+
+    // Instantiate FSMs
     auto readFsmInstanceOp =
         builder.create<circt::fsm::HWInstanceOp>(readStateFsmOutputTypes, "ReadFSM", readFsmMachineOp.getSymName(),
                                                  readStateFsmInputValues, clock, reset);
@@ -926,27 +930,61 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &to
             /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ier_next, int_ier); });
     });
 
-    mlir::Value int_isr_done_next = builder.create<circt::sv::LogicOp>(builder.getI1Type(), "int_isr_done_next");
-    mlir::Value int_isr_done_read = builder.create<circt::sv::ReadInOutOp>(int_isr_done_next);
-    mlir::Value int_isr_done = builder.create<circt::seq::CompRegOp>(int_isr_done_read, clock, reset, value0, "int_isr_done_reg");
-    mlir::Value int_isr_ready_next = builder.create<circt::sv::LogicOp>(builder.getI1Type(), "int_isr_ready_next");
-    mlir::Value int_isr_ready_read = builder.create<circt::sv::ReadInOutOp>(int_isr_ready_next);
-    mlir::Value int_isr_ready = builder.create<circt::seq::CompRegOp>(int_isr_ready_read, clock, reset, value0, "int_isr_ready_reg");
+    // ISR register (0x0C)
     mlir::Value isWaddr0x0C = builder.create<circt::comb::ICmpOp>(circt::comb::ICmpPredicate::eq, awaddr_reg,
                                                                   builder.create<circt::hw::ConstantOp>(axiAddrWidthType, 0x0C));
 
+    mlir::Value int_isr_done_next = builder.create<circt::sv::LogicOp>(builder.getI1Type(), "int_isr_done_next");
+    mlir::Value int_isr_done_read = builder.create<circt::sv::ReadInOutOp>(int_isr_done_next);
+    mlir::Value int_isr_done = builder.create<circt::seq::CompRegOp>(int_isr_done_read, clock, reset, value0, "int_isr_done_reg");
+
+    /* clang-format off */
     builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
+        mlir::Value ierBit0 = builder.create<circt::comb::ExtractOp>(int_ier, 0, 1);
+        mlir::Value isrDoneAssert = builder.create<circt::comb::AndOp>(ierBit0, hwModuleGetInputValue(mod, "ap_done"));
         builder.create<circt::sv::IfOp>(
-            builder.create<circt::comb::AndOp>(isWriteValidReady, isWaddr0x0C),
-            /*thenCtor*/ [&]() {
-                mlir::Value isrDoneBit = builder.create<circt::comb::ExtractOp>(hwModuleGetAxiSInputValue(mod, "wdata"), 0, 1);
-                mlir::Value isrReadyBit = builder.create<circt::comb::ExtractOp>(hwModuleGetAxiSInputValue(mod, "wdata"), 1, 1);
-                builder.create<circt::sv::BPAssignOp>(int_isr_done_next, isrDoneBit);
-                builder.create<circt::sv::BPAssignOp>(int_isr_ready_next, isrReadyBit); },
+            isrDoneAssert,
+            /*thenCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_isr_done_next, value1); },
             /*elseCtor*/ [&]() {
-                builder.create<circt::sv::BPAssignOp>(int_isr_done_next, int_isr_done);
-                builder.create<circt::sv::BPAssignOp>(int_isr_ready_next, int_isr_ready); });
+                builder.create<circt::sv::IfOp>(
+                    builder.create<circt::comb::AndOp>(isWriteValidReady, isWaddr0x0C),
+                    /*thenCtor*/ [&]() {
+                        // Toggle on write
+                        mlir::Value isrDoneBit = builder.create<circt::comb::ExtractOp>(hwModuleGetAxiSInputValue(mod, "wdata"), 0, 1);
+                        mlir::Value toggledValue = builder.create<circt::comb::XorOp>(int_isr_done, isrDoneBit);
+                        builder.create<circt::sv::BPAssignOp>(int_isr_done_next, toggledValue);
+                    },
+                    /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_isr_done_next, int_isr_done);
+            });
+        });
     });
+    /* clang-format on */
+
+    mlir::Value int_isr_ready_next = builder.create<circt::sv::LogicOp>(builder.getI1Type(), "int_isr_ready_next");
+    mlir::Value int_isr_ready_read = builder.create<circt::sv::ReadInOutOp>(int_isr_ready_next);
+    mlir::Value int_isr_ready = builder.create<circt::seq::CompRegOp>(int_isr_ready_read, clock, reset, value0, "int_isr_ready_reg");
+
+    /* clang-format off */
+    builder.create<circt::sv::AlwaysCombOp>(/*bodyCtor*/ [&]() {
+        mlir::Value ierBit1 = builder.create<circt::comb::ExtractOp>(int_ier, 1, 1);
+        mlir::Value isrReadyAssert = builder.create<circt::comb::AndOp>(ierBit1, apReady);
+        builder.create<circt::sv::IfOp>(
+            isrReadyAssert,
+            /*thenCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_isr_ready_next, value1); },
+            /*elseCtor*/ [&]() {
+                builder.create<circt::sv::IfOp>(
+                    builder.create<circt::comb::AndOp>(isWriteValidReady, isWaddr0x0C),
+                    /*thenCtor*/ [&]() {
+                        // Toggle on write
+                        mlir::Value isrReadyBit = builder.create<circt::comb::ExtractOp>(hwModuleGetAxiSInputValue(mod, "wdata"), 1, 1);
+                        mlir::Value toggledValue = builder.create<circt::comb::XorOp>(int_isr_ready, isrReadyBit);
+                        builder.create<circt::sv::BPAssignOp>(int_isr_ready_next, toggledValue);
+                    },
+                    /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_isr_ready_next, int_isr_ready);
+            });
+        });
+    });
+    /* clang-format on */
 
     // Create registers storing kernel arguments (scalars and buffer pointers)
     uint32_t argOffset = XRT_KERNEL_ARGS_OFFSET;
@@ -1047,6 +1085,9 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &to
             /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(rdata_next, rdata); });
     });
 
+    hwModuleOutputValues[hwModuleGetOutputIndex(mod, "interrupt")] =
+        builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(false));
+
     // Set module output operands
     auto outputOp = mod.getBodyBlock()->getTerminator();
     outputOp->setOperands(hwModuleOutputValues);
@@ -1057,9 +1098,10 @@ void CodeGen_CIRCT_Xilinx_Dev::generateToplevel(mlir::ImplicitLocOpBuilder &topB
     // Module inputs and outputs
     mlir::SmallVector<circt::hw::PortInfo> ports;
 
-    // Clock and reset signals
+    // Clock, reset and interrupt signals
     ports.push_back(circt::hw::PortInfo{topBuilder.getStringAttr("ap_clk"), circt::hw::PortDirection::INPUT, topBuilder.getI1Type()});
     ports.push_back(circt::hw::PortInfo{topBuilder.getStringAttr("ap_rst_n"), circt::hw::PortDirection::INPUT, topBuilder.getI1Type()});
+    ports.push_back(circt::hw::PortInfo{topBuilder.getStringAttr("interrupt"), circt::hw::PortDirection::OUTPUT, topBuilder.getI1Type()});
 
     // AXI4 lite subordinate control signals
     mlir::SmallVector<circt::hw::PortInfo> axi4LiteSubordinateSignals;
@@ -1126,6 +1168,8 @@ void CodeGen_CIRCT_Xilinx_Dev::generateToplevel(mlir::ImplicitLocOpBuilder &topB
     controlAxiInputs.push_back(apDoneRead);
     controlAxiArgNames.push_back(builder.getStringAttr("ap_done"));
 
+    controlAxiResultTypes.push_back(builder.getI1Type());
+    controlAxiResultNames.push_back(builder.getStringAttr("interrupt"));
     controlAxiResultTypes.push_back(builder.getI1Type());
     controlAxiResultNames.push_back(builder.getStringAttr("ap_start"));
 
@@ -1220,6 +1264,12 @@ void CodeGen_CIRCT_Xilinx_Dev::generateToplevel(mlir::ImplicitLocOpBuilder &topB
                                               builder.getArrayAttr(controlAxiResultNames),
                                               /*parameters=*/builder.getArrayAttr({}),
                                               /*sym_name=*/builder.getStringAttr("control_axi"));
+
+    // Assign interrupt signal
+    int intrIdxControlAxi = hwModuleGetOutputIndex(controlAxiInstance, "interrupt");
+    int intrIdxToplevel = hwModuleGetOutputIndex(mod, "interrupt");
+    builder.create<circt::sv::AssignOp>(hwModuleOutputWires[intrIdxToplevel],
+                                        controlAxiInstance.getResult(intrIdxControlAxi));
 
     for (const auto &signal : axi4LiteSubordinateSignals) {
         if (signal.direction == circt::hw::PortDirection::OUTPUT) {
@@ -1316,7 +1366,7 @@ void CodeGen_CIRCT_Xilinx_Dev::generateKernelXml(llvm::raw_ostream &os, const st
     pKernel->SetAttribute("attributes", "");
     pKernel->SetAttribute("preferredWorkGroupSizeMultiple", 0);
     pKernel->SetAttribute("workGroupSize", 1);
-    pKernel->SetAttribute("interrupt", "false");
+    pKernel->SetAttribute("interrupt", "true");
     pKernel->SetAttribute("hwControlProtocol", "ap_ctrl_hs");
     pRoot->InsertEndChild(pKernel);
 
