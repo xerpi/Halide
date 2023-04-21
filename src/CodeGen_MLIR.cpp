@@ -177,21 +177,21 @@ void CodeGen_MLIR::Visitor::visit(const Mod *op) {
 void CodeGen_MLIR::Visitor::visit(const Min *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    std::string a_name = unique_name('a');
-    std::string b_name = unique_name('b');
-    Expr a = Variable::make(op->a.type(), a_name);
-    Expr b = Variable::make(op->b.type(), b_name);
-    value = codegen(Let::make(a_name, op->a, Let::make(b_name, op->b, select(a < b, a, b))));
+    if (op->type.is_int()) {
+        value = builder.create<mlir::arith::MinSIOp>(codegen(op->a), codegen(op->b));
+    } else {
+        value = builder.create<mlir::arith::MinUIOp>(codegen(op->a), codegen(op->b));
+    }
 }
 
 void CodeGen_MLIR::Visitor::visit(const Max *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    std::string a_name = unique_name('a');
-    std::string b_name = unique_name('b');
-    Expr a = Variable::make(op->a.type(), a_name);
-    Expr b = Variable::make(op->b.type(), b_name);
-    value = codegen(Let::make(a_name, op->a, Let::make(b_name, op->b, select(a > b, a, b))));
+    if (op->type.is_int()) {
+        value = builder.create<mlir::arith::MaxSIOp>(codegen(op->a), codegen(op->b));
+    } else {
+        value = builder.create<mlir::arith::MaxUIOp>(codegen(op->a), codegen(op->b));
+    }
 }
 
 void CodeGen_MLIR::Visitor::visit(const EQ *op) {
@@ -241,19 +241,19 @@ void CodeGen_MLIR::Visitor::visit(const GE *op) {
 void CodeGen_MLIR::Visitor::visit(const And *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    // value = builder.create<mlir::arith::CmpIOp>(predicate, codegen(op->a), codegen(op->b));
+    value = builder.create<mlir::arith::AndIOp>(codegen(NE::make(op->a, 0)), codegen(NE::make(op->b, 0)));
 }
 
 void CodeGen_MLIR::Visitor::visit(const Or *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
+
+    value = builder.create<mlir::arith::OrIOp>(codegen(NE::make(op->a, 0)), codegen(NE::make(op->b, 0)));
 }
 
 void CodeGen_MLIR::Visitor::visit(const Not *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    mlir::Value a = codegen(op->a);
-    mlir::Value allZeroes = builder.create<mlir::arith::ConstantOp>(a.getType(), builder.getIntegerAttr(a.getType(), 0));
-    value = builder.create<mlir::arith::CmpIOp>(mlir::arith::CmpIPredicate::eq, a, allZeroes);
+    value = codegen(EQ::make(op->a, 0));
 }
 
 void CodeGen_MLIR::Visitor::visit(const Select *op) {
@@ -385,7 +385,7 @@ void CodeGen_MLIR::Visitor::visit(const Call *op) {
         // Just return 1 for now
         value = builder.create<mlir::arith::ConstantOp>(op_type, builder.getIntegerAttr(op_type, 1));
 
-        internal_error << "CodeGen_MLIR::Visitor::visit(const Call *op) not implemented\n";
+        internal_error << "CodeGen_MLIR::Visitor::visit(const Call *op): " << op->name << " not implemented\n";
     }
 }
 
