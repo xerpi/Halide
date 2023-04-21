@@ -28,13 +28,14 @@ set(HEADER_FILES
     ClampUnsafeAccesses.h
     Closure.h
     CodeGen_C.h
-    CodeGen_CIRCT_Dev.h
+    CodeGen_CIRCT.h
     CodeGen_CIRCT_Xilinx_Dev.h
     CodeGen_D3D12Compute_Dev.h
     CodeGen_GPU_Dev.h
     CodeGen_Internal.h
     CodeGen_LLVM.h
     CodeGen_Metal_Dev.h
+    CodeGen_MLIR.h
     CodeGen_OpenCL_Dev.h
     CodeGen_OpenGLCompute_Dev.h
     CodeGen_Posix.h
@@ -198,7 +199,7 @@ set(SOURCE_FILES
     Closure.cpp
     CodeGen_ARM.cpp
     CodeGen_C.cpp
-    CodeGen_CIRCT_Dev.cpp
+    CodeGen_CIRCT.cpp
     CodeGen_CIRCT_Xilinx_Dev.cpp
     CodeGen_D3D12Compute_Dev.cpp
     CodeGen_GPU_Dev.cpp
@@ -206,6 +207,7 @@ set(SOURCE_FILES
     CodeGen_Internal.cpp
     CodeGen_LLVM.cpp
     CodeGen_Metal_Dev.cpp
+    CodeGen_MLIR.cpp
     CodeGen_OpenCL_Dev.cpp
     CodeGen_OpenGLCompute_Dev.cpp
     CodeGen_Posix.cpp

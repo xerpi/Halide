@@ -1,8 +1,8 @@
-#ifndef HALIDE_CODEGEN_CIRCT_DEV_H
-#define HALIDE_CODEGEN_CIRCT_DEV_H
+#ifndef HALIDE_CODEGEN_MLIR_H
+#define HALIDE_CODEGEN_MLIR_H
 
 /** \file
- * Defines the code-generator for producing CIRCT MLIR code
+ * Defines the code-generator for producing MLIR code
  */
 
 #include "DeviceArgument.h"
@@ -25,11 +25,11 @@ static inline int argGetHWBits(const DeviceArgument &arg) {
     return arg.is_buffer ? 64 : arg.type.bits();
 }
 
-class CodeGen_CIRCT_Dev {
+class CodeGen_MLIR {
 public:
     bool compile(mlir::LocationAttr &loc, mlir::ModuleOp &mlir_module, Stmt stmt,
                  const std::string &name, const std::vector<DeviceArgument> &args,
-                 std::string &calyxOutput);
+                 int axiDataWidth);
 
 protected:
     class Visitor : public IRVisitor {

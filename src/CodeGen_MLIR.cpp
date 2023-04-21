@@ -1,6 +1,7 @@
 #include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/MemRef/IR/MemRef.h>
+#include <mlir/Dialect/SCF/IR/SCF.h>
 #include <mlir/Dialect/SCF/Transforms/Passes.h>
 #include <mlir/Dialect/Vector/IR/VectorOps.h>
 #include <mlir/IR/ImplicitLocOpBuilder.h>
@@ -9,13 +10,8 @@
 #include <mlir/Pass/PassManager.h>
 #include <mlir/Transforms/Passes.h>
 
-#include <circt/Conversion/CalyxToFSM.h>
-#include <circt/Conversion/CalyxToHW.h>
-#include <circt/Conversion/SCFToCalyx.h>
-#include <circt/Dialect/Calyx/CalyxEmitter.h>
-#include <circt/Dialect/Calyx/CalyxPasses.h>
-
-#include "CodeGen_CIRCT_Dev.h"
+#include "CodeGen_Internal.h"
+#include "CodeGen_MLIR.h"
 #include "Debug.h"
 #include "IROperator.h"
 
@@ -23,116 +19,51 @@ namespace Halide {
 
 namespace Internal {
 
-bool CodeGen_CIRCT_Dev::compile(mlir::LocationAttr &loc, mlir::ModuleOp &mlir_module, Stmt stmt, const std::string &name,
-                                const std::vector<DeviceArgument> &args, std::string &calyxOutput) {
-    debug(1) << "[Compiling kernel '" << name << "']\n";
-
+bool CodeGen_MLIR::compile(mlir::LocationAttr &loc, mlir::ModuleOp &mlir_module, Stmt stmt, const std::string &name,
+                           const std::vector<DeviceArgument> &args, int axiDataWidth) {
     mlir::ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
 
     mlir::SmallVector<mlir::Type> inputs;
     std::vector<std::string> inputNames;
     mlir::SmallVector<mlir::Type> results;
-    mlir::SmallVector<mlir::NamedAttribute> attrs;
-    mlir::SmallVector<mlir::DictionaryAttr> argAttrs;
+    mlir::SmallVector<mlir::NamedAttribute> funcAttrs;
+    mlir::SmallVector<mlir::DictionaryAttr> funcArgAttrs;
 
     for (const auto &arg : args) {
         inputs.push_back(builder.getIntegerType(argGetHWBits(arg)));
         inputNames.push_back(arg.name);
-        argAttrs.push_back(builder.getDictionaryAttr(
-            builder.getNamedAttr(circt::scfToCalyx::sPortNameAttr, builder.getStringAttr(arg.name))));
     }
 
+    // Put memrefs at the end. Treat buffers as 1D
     for (const auto &arg : args) {
         if (arg.is_buffer) {
-            // Add memref to the arguments. Treat buffers as 1D
             inputs.push_back(mlir::MemRefType::get({0}, builder.getIntegerType(arg.type.bits())));
             inputNames.push_back(arg.name + ".buffer");
-            argAttrs.push_back(builder.getDictionaryAttr(
-                builder.getNamedAttr(circt::scfToCalyx::sSequentialReads, builder.getBoolAttr(true))));
         }
     }
 
     mlir::FunctionType functionType = builder.getFunctionType(inputs, results);
-    mlir::func::FuncOp functionOp = builder.create<mlir::func::FuncOp>(builder.getStringAttr(name), functionType, attrs, argAttrs);
+    mlir::func::FuncOp functionOp = builder.create<mlir::func::FuncOp>(builder.getStringAttr(name), functionType, funcAttrs, funcArgAttrs);
     builder.setInsertionPointToStart(functionOp.addEntryBlock());
 
-    CodeGen_CIRCT_Dev::Visitor visitor(builder, inputNames);
+    CodeGen_MLIR::Visitor visitor(builder, inputNames);
     stmt.accept(&visitor);
-
     builder.create<mlir::func::ReturnOp>();
 
-    // Print MLIR before running passes
-    debug(1) << "Original MLIR:\n";
-    mlir_module.dump();
-
-    // Verify module (before running passes)
-    auto moduleVerifyResult = mlir::verify(mlir_module);
-    debug(1) << "Module verify (before passess) result: " << moduleVerifyResult.succeeded() << "\n";
-    internal_assert(moduleVerifyResult.succeeded());
-
-    // Create and run passes
-    debug(1) << "[SCF to Calyx] Start.\n";
-    mlir::PassManager pmSCFToCalyx(mlir_module.getContext());
-    pmSCFToCalyx.enableIRPrinting();
-    pmSCFToCalyx.addPass(mlir::createForToWhileLoopPass());
-    pmSCFToCalyx.addPass(mlir::createCanonicalizerPass());
-    pmSCFToCalyx.addPass(circt::createSCFToCalyxPass());
-    pmSCFToCalyx.addPass(mlir::createCanonicalizerPass());
-
-    auto pmSCFToCalyxRunResult = pmSCFToCalyx.run(mlir_module);
-    debug(1) << "[SCF to Calyx] Result: " << pmSCFToCalyxRunResult.succeeded() << "\n";
-    if (!pmSCFToCalyxRunResult.succeeded()) {
-        debug(1) << "[SCF to Calyx] MLIR:\n";
-        mlir_module.dump();
-        return false;
-    }
-
-    // Generate Calyx (for debugging purposes)
-    llvm::raw_string_ostream os(calyxOutput);
-    debug(1) << "[Exporting Calyx]\n";
-    auto exportVerilogResult = circt::calyx::exportCalyx(mlir_module, os);
-    debug(1) << "[Export Calyx] Result: " << exportVerilogResult.succeeded() << "\n";
-
-    debug(1) << "[Calyx to FSM] Start.\n";
-    mlir::PassManager pmCalyxToFSM(mlir_module.getContext());
-    pmCalyxToFSM.nest<circt::calyx::ComponentOp>().addPass(circt::calyx::createRemoveCombGroupsPass());
-    pmCalyxToFSM.addPass(mlir::createCanonicalizerPass());
-    pmCalyxToFSM.nest<circt::calyx::ComponentOp>().addPass(circt::createCalyxToFSMPass());
-    pmCalyxToFSM.addPass(mlir::createCanonicalizerPass());
-    pmCalyxToFSM.nest<circt::calyx::ComponentOp>().addPass(circt::createMaterializeCalyxToFSMPass());
-    pmCalyxToFSM.addPass(mlir::createCanonicalizerPass());
-    pmCalyxToFSM.nest<circt::calyx::ComponentOp>().addPass(circt::createRemoveGroupsFromFSMPass());
-    pmCalyxToFSM.nest<circt::calyx::ComponentOp>().addPass(circt::calyx::createClkInsertionPass());
-    pmCalyxToFSM.nest<circt::calyx::ComponentOp>().addPass(circt::calyx::createResetInsertionPass());
-    pmCalyxToFSM.addPass(mlir::createCanonicalizerPass());
-    pmCalyxToFSM.addPass(circt::createCalyxToHWPass());
-    pmCalyxToFSM.addPass(mlir::createCanonicalizerPass());
-
-    auto pmCalyxToFSMRunResult = pmCalyxToFSM.run(mlir_module);
-    debug(1) << "[Calyx to FSM] Result: " << pmCalyxToFSMRunResult.succeeded() << "\n";
-    if (!pmCalyxToFSMRunResult.succeeded()) {
-        debug(1) << "[Calyx to FSM] MLIR:\n";
-        mlir_module.dump();
-        return false;
-    }
-
-    debug(1) << "[Compiled kernel '" << name << "']\n";
-    return true;
+    return mlir::verify(mlir_module).succeeded();
 }
 
-CodeGen_CIRCT_Dev::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, const std::vector<std::string> &inputNames)
+CodeGen_MLIR::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, const std::vector<std::string> &inputNames)
     : builder(builder) {
 
     mlir::func::FuncOp funcOp = cast<mlir::func::FuncOp>(builder.getBlock()->getParentOp());
 
     // Add function arguments to the symbol table
-    for (unsigned int i = 0; i < funcOp.getFunctionType().getNumInputs(); i++) {
-        std::string name = inputNames[i];
-        sym_push(name, funcOp.getArgument(i));
-    }
+    for (unsigned int i = 0; i < funcOp.getFunctionType().getNumInputs(); i++)
+        sym_push(inputNames[i], funcOp.getArgument(i));
 }
 
-mlir::Value CodeGen_CIRCT_Dev::Visitor::codegen(const Expr &e) {
+mlir::Value CodeGen_MLIR::Visitor::codegen(const Expr &e) {
     internal_assert(e.defined());
     debug(4) << "Codegen (E): " << e.type() << ", " << e << "\n";
     value = mlir::Value();
@@ -142,34 +73,34 @@ mlir::Value CodeGen_CIRCT_Dev::Visitor::codegen(const Expr &e) {
     return value;
 }
 
-void CodeGen_CIRCT_Dev::Visitor::codegen(const Stmt &s) {
+void CodeGen_MLIR::Visitor::codegen(const Stmt &s) {
     internal_assert(s.defined());
     debug(4) << "Codegen (S): " << s << "\n";
     value = mlir::Value();
     s.accept(this);
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const IntImm *op) {
+void CodeGen_MLIR::Visitor::visit(const IntImm *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
     mlir::Type type = builder.getIntegerType(op->type.bits());
     value = builder.create<mlir::arith::ConstantOp>(type, builder.getIntegerAttr(type, op->value));
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const UIntImm *op) {
+void CodeGen_MLIR::Visitor::visit(const UIntImm *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
     mlir::Type type = builder.getIntegerType(op->type.bits());
     value = builder.create<mlir::arith::ConstantOp>(type, builder.getIntegerAttr(type, op->value));
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const FloatImm *op) {
+void CodeGen_MLIR::Visitor::visit(const FloatImm *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const StringImm *op) {
+void CodeGen_MLIR::Visitor::visit(const StringImm *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Cast *op) {
+void CodeGen_MLIR::Visitor::visit(const Cast *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     Halide::Type src = op->value.type();
@@ -195,35 +126,35 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Cast *op) {
     }
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Reinterpret *op) {
+void CodeGen_MLIR::Visitor::visit(const Reinterpret *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Variable *op) {
+void CodeGen_MLIR::Visitor::visit(const Variable *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
     debug(3) << "\tname: " << op->name << "\n";
     value = sym_get(op->name, true);
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Add *op) {
+void CodeGen_MLIR::Visitor::visit(const Add *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     value = builder.create<mlir::arith::AddIOp>(codegen(op->a), codegen(op->b));
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Sub *op) {
+void CodeGen_MLIR::Visitor::visit(const Sub *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     value = builder.create<mlir::arith::SubIOp>(codegen(op->a), codegen(op->b));
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Mul *op) {
+void CodeGen_MLIR::Visitor::visit(const Mul *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     value = builder.create<mlir::arith::MulIOp>(codegen(op->a), codegen(op->b));
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Div *op) {
+void CodeGen_MLIR::Visitor::visit(const Div *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     if (op->type.is_int()) {
@@ -233,7 +164,7 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Div *op) {
     }
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Mod *op) {
+void CodeGen_MLIR::Visitor::visit(const Mod *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     if (op->type.is_int()) {
@@ -243,7 +174,7 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Mod *op) {
     }
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Min *op) {
+void CodeGen_MLIR::Visitor::visit(const Min *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     std::string a_name = unique_name('a');
@@ -253,7 +184,7 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Min *op) {
     value = codegen(Let::make(a_name, op->a, Let::make(b_name, op->b, select(a < b, a, b))));
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Max *op) {
+void CodeGen_MLIR::Visitor::visit(const Max *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     std::string a_name = unique_name('a');
@@ -263,19 +194,19 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Max *op) {
     value = codegen(Let::make(a_name, op->a, Let::make(b_name, op->b, select(a > b, a, b))));
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const EQ *op) {
+void CodeGen_MLIR::Visitor::visit(const EQ *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     value = builder.create<mlir::arith::CmpIOp>(mlir::arith::CmpIPredicate::eq, codegen(op->a), codegen(op->b));
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const NE *op) {
+void CodeGen_MLIR::Visitor::visit(const NE *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     value = builder.create<mlir::arith::CmpIOp>(mlir::arith::CmpIPredicate::ne, codegen(op->a), codegen(op->b));
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const LT *op) {
+void CodeGen_MLIR::Visitor::visit(const LT *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     mlir::arith::CmpIPredicate predicate = op->type.is_int() ? mlir::arith::CmpIPredicate::slt :
@@ -283,7 +214,7 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const LT *op) {
     value = builder.create<mlir::arith::CmpIOp>(predicate, codegen(op->a), codegen(op->b));
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const LE *op) {
+void CodeGen_MLIR::Visitor::visit(const LE *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     mlir::arith::CmpIPredicate predicate = op->type.is_int() ? mlir::arith::CmpIPredicate::sle :
@@ -291,7 +222,7 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const LE *op) {
     value = builder.create<mlir::arith::CmpIOp>(predicate, codegen(op->a), codegen(op->b));
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const GT *op) {
+void CodeGen_MLIR::Visitor::visit(const GT *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     mlir::arith::CmpIPredicate predicate = op->type.is_int() ? mlir::arith::CmpIPredicate::sgt :
@@ -299,7 +230,7 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const GT *op) {
     value = builder.create<mlir::arith::CmpIOp>(predicate, codegen(op->a), codegen(op->b));
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const GE *op) {
+void CodeGen_MLIR::Visitor::visit(const GE *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     mlir::arith::CmpIPredicate predicate = op->type.is_int() ? mlir::arith::CmpIPredicate::sge :
@@ -307,17 +238,17 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const GE *op) {
     value = builder.create<mlir::arith::CmpIOp>(predicate, codegen(op->a), codegen(op->b));
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const And *op) {
+void CodeGen_MLIR::Visitor::visit(const And *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     // value = builder.create<mlir::arith::CmpIOp>(predicate, codegen(op->a), codegen(op->b));
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Or *op) {
+void CodeGen_MLIR::Visitor::visit(const Or *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Not *op) {
+void CodeGen_MLIR::Visitor::visit(const Not *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     mlir::Value a = codegen(op->a);
@@ -325,7 +256,7 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Not *op) {
     value = builder.create<mlir::arith::CmpIOp>(mlir::arith::CmpIPredicate::eq, a, allZeroes);
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Select *op) {
+void CodeGen_MLIR::Visitor::visit(const Select *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     // mlir::Value trueValue = codegen(op->true_value);
@@ -369,21 +300,37 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Select *op) {
 #endif
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Load *op) {
+void CodeGen_MLIR::Visitor::visit(const Load *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
     debug(3) << "\tName: " << op->name << "\n";
 
+    mlir::Value buffer = sym_get(op->name + ".buffer");
+    mlir::Value index;
+    if (op->type.is_scalar()) {
+        index = codegen(op->index);
+    } else if (Expr ramp_base = strided_ramp_base(op->index); ramp_base.defined()) {
+        index = codegen(ramp_base);
+    } else {
+        user_error << "Unsupported load.";
+    }
+
     mlir::Value baseAddr = sym_get(op->name);
-    mlir::Value index = builder.create<mlir::arith::ExtUIOp>(builder.getI64Type(), codegen(op->index));
+    mlir::Value indexI64 = builder.create<mlir::arith::ExtUIOp>(builder.getI64Type(), index);
     mlir::Value elementSize = builder.create<mlir::arith::ConstantOp>(builder.getI64IntegerAttr(op->type.bytes()));
-    mlir::Value offset = builder.create<mlir::arith::MulIOp>(index, elementSize);
+    mlir::Value offset = builder.create<mlir::arith::MulIOp>(indexI64, elementSize);
     mlir::Value loadAddress = builder.create<mlir::arith::AddIOp>(baseAddr, offset);
     mlir::Value loadAddressAsIndex = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), loadAddress);
 
-    value = builder.create<mlir::memref::LoadOp>(sym_get(op->name + ".buffer"), mlir::ValueRange{loadAddressAsIndex});
+    if (op->type.is_scalar()) {
+        value = builder.create<mlir::memref::LoadOp>(buffer, mlir::ValueRange{loadAddressAsIndex});
+    } else {
+        mlir::Type elementType = builder.getIntegerType(op->type.bits());
+        mlir::VectorType vectorType = mlir::VectorType::get(op->type.lanes(), elementType);
+        value = builder.create<mlir::vector::LoadOp>(vectorType, buffer, mlir::ValueRange{loadAddressAsIndex});
+    }
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Ramp *op) {
+void CodeGen_MLIR::Visitor::visit(const Ramp *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     mlir::Value base = codegen(op->base);
@@ -401,55 +348,48 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Ramp *op) {
     mlir::Value offsets = builder.create<mlir::arith::MulIOp>(splatStride, indicesConst);
     mlir::Value splatBase = builder.create<mlir::vector::SplatOp>(vectorType, base);
     value = builder.create<mlir::arith::AddIOp>(splatBase, offsets);
-
-    /*
-        mlir::Value vector = builder.create<mlir::arith::ConstantOp>(vectorType);
-        // mlir::SmallVector<mlir::Value> elements;
-        for (int i = 0; i < op->lanes; i++) {
-            // mlir::Value element = builder.create<mlir::arith::ConstantOp>(builder.getIntegerAttr(elementType, i));
-            // elements[i] = builder.create<mlir::vector::InsertElementOp>(type, value, element, i);
-            mlir::Value index = builder.create<mlir::arith::ConstantOp>(builder.getIntegerAttr(elementType, i));
-            mlir::Value offset = builder.create<mlir::arith::MulIOp>(index, stride);
-            vector = builder.create<mlir::vector::InsertElementOp>(type, value, element, i);
-            // elements[i] = builder.create<mlir::arith::AddIOp>(base, offset);
-        }
-
-        builder.getI32VectorAttr
-
-        mlir::DenseElementsAttr::get(vectorType, );
-        vector = builder.create<mlir::arith::ConstantOp>(builder.getIntegerAttr(elementType, i));
-    */
-    // elements[i] = builder.create<mlir::vector::InsertElementOp>(type, value, element, i);
-
-    /** A linear ramp vector node. This is vector with 'lanes' elements,
-     * where element i is 'base' + i*'stride'. This is a convenient way to
-     * pass around vectors without busting them up into individual
-     * elements. E.g. a dense vector load from a buffer can use a ramp
-     * node with stride 1 as the index. */
-    // struct Ramp : public ExprNode<Ramp> {
-    //     Expr base, stride;
-    //     int lanes;
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Broadcast *op) {
+void CodeGen_MLIR::Visitor::visit(const Broadcast *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
+
+    mlir::Type elementType = builder.getIntegerType(op->value.type().bits());
+    mlir::VectorType vectorType = mlir::VectorType::get(op->lanes, elementType);
+    value = builder.create<mlir::vector::SplatOp>(vectorType, codegen(op->value));
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Call *op) {
+void CodeGen_MLIR::Visitor::visit(const Call *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
     debug(3) << "\tName: " << op->name << "\n";
     debug(3) << "\tCall type: " << op->call_type << "\n";
     for (const Expr &e : op->args)
         debug(3) << "\tArg: " << e << "\n";
 
-    mlir::Type op_type = builder.getIntegerType(op->type.bits());
-    // Just return 1 for now
-    value = builder.create<mlir::arith::ConstantOp>(op_type, builder.getIntegerAttr(op_type, 1));
+    if (op->is_intrinsic(Call::shift_left)) {
+        value = builder.create<mlir::arith::ShLIOp>(codegen(op->args[0]), codegen(op->args[1]));
+    } else if (op->is_intrinsic(Call::shift_right)) {
+        if (op->type.is_int())
+            value = builder.create<mlir::arith::ShRSIOp>(codegen(op->args[0]), codegen(op->args[1]));
+        else
+            value = builder.create<mlir::arith::ShRUIOp>(codegen(op->args[0]), codegen(op->args[1]));
+    } else if (op->is_intrinsic(Call::widen_right_mul)) {
+        mlir::Value a = codegen(op->args[0]);
+        mlir::Value b = codegen(op->args[1]);
+        if (op->type.is_int())
+            b = builder.create<mlir::arith::ExtSIOp>(a.getType(), b);
+        else
+            b = builder.create<mlir::arith::ExtUIOp>(a.getType(), b);
+        value = builder.create<mlir::arith::MulIOp>(a, b);
+    } else {
+        mlir::Type op_type = builder.getIntegerType(op->type.bits());
+        // Just return 1 for now
+        value = builder.create<mlir::arith::ConstantOp>(op_type, builder.getIntegerAttr(op_type, 1));
 
-    internal_error << "CodeGen_CIRCT_Dev::Visitor::visit(const Call *op) not implemented\n";
+        internal_error << "CodeGen_MLIR::Visitor::visit(const Call *op) not implemented\n";
+    }
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Let *op) {
+void CodeGen_MLIR::Visitor::visit(const Let *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     sym_push(op->name, codegen(op->value));
@@ -457,7 +397,7 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Let *op) {
     sym_pop(op->name);
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const LetStmt *op) {
+void CodeGen_MLIR::Visitor::visit(const LetStmt *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
     debug(3) << "Contents:\n";
     debug(3) << "\tName: " << op->name << "\n";
@@ -466,18 +406,18 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const LetStmt *op) {
     sym_pop(op->name);
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const AssertStmt *op) {
+void CodeGen_MLIR::Visitor::visit(const AssertStmt *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const ProducerConsumer *op) {
+void CodeGen_MLIR::Visitor::visit(const ProducerConsumer *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
     debug(3) << "\tName: " << op->name << "\n";
     debug(3) << "\tIs producer: " << op->is_producer << "\n";
     codegen(op->body);
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const For *op) {
+void CodeGen_MLIR::Visitor::visit(const For *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
     debug(3) << "\tName: " << op->name << "\n";
     debug(3) << "\tMin: " << op->min << "\n";
@@ -514,16 +454,18 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const For *op) {
     builder = prevBuilder;
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Store *op) {
+void CodeGen_MLIR::Visitor::visit(const Store *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
     debug(3) << "\tName: " << op->name << "\n";
     debug(3) << "\tValue lanes: " << op->value.type().lanes() << "\n";
 
+    mlir::Value value = codegen(op->value);
+    mlir::Value buffer = sym_get(op->name + ".buffer");
     mlir::Value index;
     if (op->value.type().is_scalar()) {
         index = codegen(op->index);
     } else if (Expr ramp_base = strided_ramp_base(op->index); ramp_base.defined()) {
-        index = codegen(ramp_base / op->value.type().lanes());
+        index = codegen(ramp_base);
     } else {
         user_error << "Unsupported store.";
     }
@@ -535,14 +477,17 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Store *op) {
     mlir::Value storeAddress = builder.create<mlir::arith::AddIOp>(baseAddr, offset);
     mlir::Value storeAddressAsIndex = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), storeAddress);
 
-    builder.create<mlir::vector::StoreOp>(codegen(op->value), sym_get(op->name + ".buffer"), mlir::ValueRange{storeAddressAsIndex});
+    if (op->value.type().is_scalar())
+        builder.create<mlir::memref::StoreOp>(value, buffer, mlir::ValueRange{storeAddressAsIndex});
+    else
+        builder.create<mlir::vector::StoreOp>(value, buffer, mlir::ValueRange{storeAddressAsIndex});
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Provide *op) {
+void CodeGen_MLIR::Visitor::visit(const Provide *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Allocate *op) {
+void CodeGen_MLIR::Visitor::visit(const Allocate *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
     int32_t size = op->constant_allocation_size();
@@ -559,15 +504,15 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Allocate *op) {
     codegen(op->body);
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Free *op) {
+void CodeGen_MLIR::Visitor::visit(const Free *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Realize *op) {
+void CodeGen_MLIR::Visitor::visit(const Realize *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Block *op) {
+void CodeGen_MLIR::Visitor::visit(const Block *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
     // Peel blocks of assertions with pure conditions
     const AssertStmt *a = op->first.as<AssertStmt>();
@@ -587,7 +532,7 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Block *op) {
     }
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const IfThenElse *op) {
+void CodeGen_MLIR::Visitor::visit(const IfThenElse *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
     debug(3) << "Contents:\n";
     debug(3) << "\tcondition: " << op->condition << "\n";
@@ -604,7 +549,7 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const IfThenElse *op) {
     }
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Evaluate *op) {
+void CodeGen_MLIR::Visitor::visit(const Evaluate *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
     codegen(op->value);
 
@@ -612,40 +557,40 @@ void CodeGen_CIRCT_Dev::Visitor::visit(const Evaluate *op) {
     value = mlir::Value();
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Shuffle *op) {
+void CodeGen_MLIR::Visitor::visit(const Shuffle *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const VectorReduce *op) {
+void CodeGen_MLIR::Visitor::visit(const VectorReduce *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Prefetch *op) {
+void CodeGen_MLIR::Visitor::visit(const Prefetch *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Fork *op) {
+void CodeGen_MLIR::Visitor::visit(const Fork *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Acquire *op) {
+void CodeGen_MLIR::Visitor::visit(const Acquire *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
-void CodeGen_CIRCT_Dev::Visitor::visit(const Atomic *op) {
+void CodeGen_MLIR::Visitor::visit(const Atomic *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 }
 
-void CodeGen_CIRCT_Dev::Visitor::sym_push(const std::string &name, mlir::Value value) {
+void CodeGen_MLIR::Visitor::sym_push(const std::string &name, mlir::Value value) {
     // value.getDefiningOp()->setAttr("sv.namehint", builder.getStringAttr(name));
     symbol_table.push(name, value);
 }
 
-void CodeGen_CIRCT_Dev::Visitor::sym_pop(const std::string &name) {
+void CodeGen_MLIR::Visitor::sym_pop(const std::string &name) {
     symbol_table.pop(name);
 }
 
-mlir::Value CodeGen_CIRCT_Dev::Visitor::sym_get(const std::string &name, bool must_succeed) const {
+mlir::Value CodeGen_MLIR::Visitor::sym_get(const std::string &name, bool must_succeed) const {
     // look in the symbol table
     if (!symbol_table.contains(name)) {
         if (must_succeed) {

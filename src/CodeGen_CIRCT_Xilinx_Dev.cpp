@@ -40,8 +40,9 @@
 #include <circt/Support/LoweringOptions.h>
 
 #include "CodeGen_Accelerator_Dev.h"
-#include "CodeGen_CIRCT_Dev.h"
+#include "CodeGen_CIRCT.h"
 #include "CodeGen_CIRCT_Xilinx_Dev.h"
+#include "CodeGen_MLIR.h"
 #include "Debug.h"
 #include "IROperator.h"
 #include "IRVisitor.h"
@@ -578,7 +579,8 @@ void CodeGen_CIRCT_Xilinx_Dev::generateCalyxExtMemToAxi(mlir::ImplicitLocOpBuild
     auto calyxWriteData = hwModuleGetInputValue(mod, "calyx_write_data");
     auto axiReaddData = hwModuleGetAxiMInputValue(mod, "rdata");
 
-    auto accessDataBusOffset = zeroExtend(builder.create<circt::comb::ExtractOp>(calyxAddr0, 0, llvm::Log2_32(M_AXI_DATA_WIDTH / 8)),
+    const int dataBusOffsetBits = llvm::Log2_32(M_AXI_DATA_WIDTH / 8);
+    auto accessDataBusOffset = zeroExtend(builder.create<circt::comb::ExtractOp>(calyxAddr0, 0, dataBusOffsetBits),
                                           M_AXI_DATA_WIDTH / 8);
 
     int wstrbSize = M_AXI_DATA_WIDTH / 8;
