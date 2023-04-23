@@ -31,6 +31,8 @@ public:
                  const std::string &name, const std::vector<DeviceArgument> &args,
                  int axiDataWidth);
 
+    static mlir::Type mlir_type_of(mlir::ImplicitLocOpBuilder &builder, Halide::Type t);
+
 protected:
     class Visitor : public IRVisitor {
     public:
@@ -87,6 +89,8 @@ protected:
         void visit(const Fork *) override;
         void visit(const Acquire *) override;
         void visit(const Atomic *) override;
+
+        mlir::Type mlir_type_of(Halide::Type t) const;
 
         void sym_push(const std::string &name, mlir::Value value);
         void sym_pop(const std::string &name);

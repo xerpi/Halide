@@ -30,14 +30,14 @@ bool CodeGen_MLIR::compile(mlir::LocationAttr &loc, mlir::ModuleOp &mlir_module,
     mlir::SmallVector<mlir::DictionaryAttr> funcArgAttrs;
 
     for (const auto &arg : args) {
-        inputs.push_back(builder.getIntegerType(argGetHWBits(arg)));
+        inputs.push_back(arg.is_buffer ? builder.getI64Type() : mlir_type_of(builder, arg.type));
         inputNames.push_back(arg.name);
     }
 
     // Put memrefs at the end. Treat buffers as 1D
     for (const auto &arg : args) {
         if (arg.is_buffer) {
-            inputs.push_back(mlir::MemRefType::get({0}, builder.getIntegerType(arg.type.bits())));
+            inputs.push_back(mlir::MemRefType::get({0}, mlir_type_of(builder, arg.type)));
             inputNames.push_back(arg.name + ".buffer");
         }
     }
@@ -51,6 +51,34 @@ bool CodeGen_MLIR::compile(mlir::LocationAttr &loc, mlir::ModuleOp &mlir_module,
     builder.create<mlir::func::ReturnOp>();
 
     return mlir::verify(mlir_module).succeeded();
+}
+
+mlir::Type CodeGen_MLIR::mlir_type_of(mlir::ImplicitLocOpBuilder &builder, Halide::Type t) {
+    if (t.lanes() == 1) {
+        if (t.is_int_or_uint()) {
+            return builder.getIntegerType(t.bits());
+        } else if (t.is_bfloat()) {
+            return builder.getBF16Type();
+        } else if (t.is_float()) {
+            switch (t.bits()) {
+            case 16:
+                return builder.getF16Type();
+            case 32:
+                return builder.getF32Type();
+            case 64:
+                return builder.getF64Type();
+            default:
+                internal_error << "There is no MLIR type matching this floating-point bit width: " << t << "\n";
+                return nullptr;
+            }
+        } else {
+            internal_error << "Type not supported: " << t << "\n";
+        }
+    } else {
+        return mlir::VectorType::get(t.lanes(), mlir_type_of(builder, t.element_of()));
+    }
+
+    return mlir::Type();
 }
 
 CodeGen_MLIR::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, const std::vector<std::string> &inputNames)
@@ -82,22 +110,26 @@ void CodeGen_MLIR::Visitor::codegen(const Stmt &s) {
 
 void CodeGen_MLIR::Visitor::visit(const IntImm *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
-    mlir::Type type = builder.getIntegerType(op->type.bits());
+    mlir::Type type = mlir_type_of(op->type);
     value = builder.create<mlir::arith::ConstantOp>(type, builder.getIntegerAttr(type, op->value));
 }
 
 void CodeGen_MLIR::Visitor::visit(const UIntImm *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
-    mlir::Type type = builder.getIntegerType(op->type.bits());
+    mlir::Type type = mlir_type_of(op->type);
     value = builder.create<mlir::arith::ConstantOp>(type, builder.getIntegerAttr(type, op->value));
 }
 
 void CodeGen_MLIR::Visitor::visit(const FloatImm *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
+    mlir::Type type = mlir_type_of(op->type);
+    value = builder.create<mlir::arith::ConstantOp>(type, builder.getFloatAttr(type, op->value));
 }
 
 void CodeGen_MLIR::Visitor::visit(const StringImm *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
+
+    internal_error << "String immediates are not supported.\n";
 }
 
 void CodeGen_MLIR::Visitor::visit(const Cast *op) {
@@ -105,29 +137,45 @@ void CodeGen_MLIR::Visitor::visit(const Cast *op) {
 
     Halide::Type src = op->value.type();
     Halide::Type dst = op->type;
-    mlir::Type dstType = builder.getIntegerType(dst.bits());
+    mlir::Type mlir_type = mlir_type_of(dst);
 
-    debug(3) << "\tSrc type: " << src << "\n";
-    debug(3) << "\tDst type: " << dst << "\n";
+    debug(3) << "\tsrc type: " << src << "\n";
+    debug(3) << "\tdst type: " << dst << "\n";
 
     value = codegen(op->value);
 
     if (src.is_int_or_uint() && dst.is_int_or_uint()) {
         if (dst.bits() > src.bits()) {
             if (src.is_int())
-                value = builder.create<mlir::arith::ExtSIOp>(dstType, value);
+                value = builder.create<mlir::arith::ExtSIOp>(mlir_type, value);
             else
-                value = builder.create<mlir::arith::ExtUIOp>(dstType, value);
+                value = builder.create<mlir::arith::ExtUIOp>(mlir_type, value);
         } else {
-            value = builder.create<mlir::arith::TruncIOp>(dstType, value);
+            value = builder.create<mlir::arith::TruncIOp>(mlir_type, value);
+        }
+    } else if (src.is_float() && dst.is_int()) {
+        value = builder.create<mlir::arith::FPToSIOp>(mlir_type, value);
+    } else if (src.is_float() && dst.is_uint()) {
+        value = builder.create<mlir::arith::FPToUIOp>(mlir_type, value);
+    } else if (src.is_int() && dst.is_float()) {
+        value = builder.create<mlir::arith::SIToFPOp>(mlir_type, value);
+    } else if (src.is_uint() && dst.is_float()) {
+        value = builder.create<mlir::arith::UIToFPOp>(mlir_type, value);
+    } else if (src.is_float() && dst.is_float()) {
+        if (dst.bits() > src.bits()) {
+            value = builder.create<mlir::arith::ExtFOp>(mlir_type, value);
+        } else {
+            value = builder.create<mlir::arith::TruncFOp>(mlir_type, value);
         }
     } else {
-        assert(0);
+        internal_error << "Cast of " << src << " to " << dst << " is not implemented.\n";
     }
 }
 
 void CodeGen_MLIR::Visitor::visit(const Reinterpret *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
+
+    value = builder.create<mlir::arith::BitcastOp>(mlir_type_of(op->type), codegen(op->value));
 }
 
 void CodeGen_MLIR::Visitor::visit(const Variable *op) {
@@ -139,59 +187,72 @@ void CodeGen_MLIR::Visitor::visit(const Variable *op) {
 void CodeGen_MLIR::Visitor::visit(const Add *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    value = builder.create<mlir::arith::AddIOp>(codegen(op->a), codegen(op->b));
+    if (op->type.is_int_or_uint())
+        value = builder.create<mlir::arith::AddIOp>(codegen(op->a), codegen(op->b));
+    else if (op->type.is_float())
+        value = builder.create<mlir::arith::AddFOp>(codegen(op->a), codegen(op->b));
 }
 
 void CodeGen_MLIR::Visitor::visit(const Sub *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    value = builder.create<mlir::arith::SubIOp>(codegen(op->a), codegen(op->b));
+    if (op->type.is_int_or_uint())
+        value = builder.create<mlir::arith::SubIOp>(codegen(op->a), codegen(op->b));
+    else if (op->type.is_float())
+        value = builder.create<mlir::arith::SubFOp>(codegen(op->a), codegen(op->b));
 }
 
 void CodeGen_MLIR::Visitor::visit(const Mul *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    value = builder.create<mlir::arith::MulIOp>(codegen(op->a), codegen(op->b));
+    if (op->type.is_int_or_uint())
+        value = builder.create<mlir::arith::MulIOp>(codegen(op->a), codegen(op->b));
+    else if (op->type.is_float())
+        value = builder.create<mlir::arith::MulFOp>(codegen(op->a), codegen(op->b));
 }
 
 void CodeGen_MLIR::Visitor::visit(const Div *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    if (op->type.is_int()) {
+    if (op->type.is_int())
         value = builder.create<mlir::arith::DivSIOp>(codegen(op->a), codegen(op->b));
-    } else {
+    else if (op->type.is_uint())
         value = builder.create<mlir::arith::DivUIOp>(codegen(op->a), codegen(op->b));
-    }
+    else if (op->type.is_float())
+        value = builder.create<mlir::arith::DivFOp>(codegen(op->a), codegen(op->b));
 }
 
 void CodeGen_MLIR::Visitor::visit(const Mod *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    if (op->type.is_int()) {
+    if (op->type.is_int())
         value = builder.create<mlir::arith::RemSIOp>(codegen(op->a), codegen(op->b));
-    } else {
+    else if (op->type.is_uint())
         value = builder.create<mlir::arith::RemUIOp>(codegen(op->a), codegen(op->b));
-    }
+    else if (op->type.is_float())
+        value = builder.create<mlir::arith::RemFOp>(codegen(op->a), codegen(op->b));
 }
 
 void CodeGen_MLIR::Visitor::visit(const Min *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    if (op->type.is_int()) {
+    if (op->type.is_int())
         value = builder.create<mlir::arith::MinSIOp>(codegen(op->a), codegen(op->b));
-    } else {
+    else if (op->type.is_uint())
         value = builder.create<mlir::arith::MinUIOp>(codegen(op->a), codegen(op->b));
-    }
+    else if (op->type.is_float())
+        value = builder.create<mlir::arith::MinFOp>(codegen(op->a), codegen(op->b));
 }
 
 void CodeGen_MLIR::Visitor::visit(const Max *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    if (op->type.is_int()) {
+    if (op->type.is_int())
         value = builder.create<mlir::arith::MaxSIOp>(codegen(op->a), codegen(op->b));
-    } else {
+    else if (op->type.is_uint())
         value = builder.create<mlir::arith::MaxUIOp>(codegen(op->a), codegen(op->b));
-    }
+    else if (op->type.is_float())
+        value = builder.create<mlir::arith::MaxFOp>(codegen(op->a), codegen(op->b));
 }
 
 void CodeGen_MLIR::Visitor::visit(const EQ *op) {
@@ -324,9 +385,7 @@ void CodeGen_MLIR::Visitor::visit(const Load *op) {
     if (op->type.is_scalar()) {
         value = builder.create<mlir::memref::LoadOp>(buffer, mlir::ValueRange{loadAddressAsIndex});
     } else {
-        mlir::Type elementType = builder.getIntegerType(op->type.bits());
-        mlir::VectorType vectorType = mlir::VectorType::get(op->type.lanes(), elementType);
-        value = builder.create<mlir::vector::LoadOp>(vectorType, buffer, mlir::ValueRange{loadAddressAsIndex});
+        value = builder.create<mlir::vector::LoadOp>(mlir_type_of(op->type), buffer, mlir::ValueRange{loadAddressAsIndex});
     }
 }
 
@@ -335,7 +394,7 @@ void CodeGen_MLIR::Visitor::visit(const Ramp *op) {
 
     mlir::Value base = codegen(op->base);
     mlir::Value stride = codegen(op->stride);
-    mlir::Type elementType = builder.getIntegerType(op->base.type().bits());
+    mlir::Type elementType = mlir_type_of(op->base.type());
     mlir::VectorType vectorType = mlir::VectorType::get(op->lanes, elementType);
 
     mlir::SmallVector<mlir::Attribute> indicesAttrs(op->lanes);
@@ -353,9 +412,10 @@ void CodeGen_MLIR::Visitor::visit(const Ramp *op) {
 void CodeGen_MLIR::Visitor::visit(const Broadcast *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    mlir::Type elementType = builder.getIntegerType(op->value.type().bits());
-    mlir::VectorType vectorType = mlir::VectorType::get(op->lanes, elementType);
-    value = builder.create<mlir::vector::SplatOp>(vectorType, codegen(op->value));
+    debug(2) << "AAAA: lanes: " << op->type.lanes() << " vs " << op->lanes << "\n";
+    debug(2) << "AAAA: type: " << op->type << " vs " << op->value.type() << "\n";
+
+    value = builder.create<mlir::vector::SplatOp>(mlir_type_of(op->type), codegen(op->value));
 }
 
 void CodeGen_MLIR::Visitor::visit(const Call *op) {
@@ -381,10 +441,6 @@ void CodeGen_MLIR::Visitor::visit(const Call *op) {
             b = builder.create<mlir::arith::ExtUIOp>(a.getType(), b);
         value = builder.create<mlir::arith::MulIOp>(a, b);
     } else {
-        mlir::Type op_type = builder.getIntegerType(op->type.bits());
-        // Just return 1 for now
-        value = builder.create<mlir::arith::ConstantOp>(op_type, builder.getIntegerAttr(op_type, 1));
-
         internal_error << "CodeGen_MLIR::Visitor::visit(const Call *op): " << op->name << " not implemented\n";
     }
 }
@@ -579,6 +635,10 @@ void CodeGen_MLIR::Visitor::visit(const Acquire *op) {
 
 void CodeGen_MLIR::Visitor::visit(const Atomic *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
+}
+
+mlir::Type CodeGen_MLIR::Visitor::mlir_type_of(Halide::Type t) const {
+    return CodeGen_MLIR::mlir_type_of(builder, t);
 }
 
 void CodeGen_MLIR::Visitor::sym_push(const std::string &name, mlir::Value value) {
