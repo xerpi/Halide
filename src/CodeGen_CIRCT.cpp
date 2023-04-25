@@ -58,6 +58,12 @@ bool CodeGen_CIRCT_Dev::compile(mlir::LocationAttr &loc, mlir::ModuleOp &mlir_mo
         }
     });
 
+    // Set "sequential reads" attribute to all allocated memories
+    mlir_module.walk([&](mlir::memref::AllocOp allocOp) {
+        mlir::ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
+        allocOp->setAttr(circt::scfToCalyx::sSequentialReads, builder.getBoolAttr(true));
+    });
+
     // Create and run passes
     debug(1) << "[SCF to Calyx] Start.\n";
     mlir::PassManager pmSCFToCalyx(mlir_module.getContext());
@@ -79,8 +85,8 @@ bool CodeGen_CIRCT_Dev::compile(mlir::LocationAttr &loc, mlir::ModuleOp &mlir_mo
     if (0) {
         llvm::raw_string_ostream os(calyxOutput);
         debug(1) << "[Exporting Calyx]\n";
-        auto exportVerilogResult = circt::calyx::exportCalyx(mlir_module, os);
-        debug(1) << "[Export Calyx] Result: " << exportVerilogResult.succeeded() << "\n";
+        auto exportCalyxResult = circt::calyx::exportCalyx(mlir_module, os);
+        debug(1) << "[Export Calyx] Result: " << exportCalyxResult.succeeded() << "\n";
     }
 
     debug(1) << "[Calyx to FSM] Start.\n";

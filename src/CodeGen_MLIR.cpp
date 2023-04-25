@@ -14,6 +14,7 @@
 #include "CodeGen_MLIR.h"
 #include "Debug.h"
 #include "IROperator.h"
+#include "Simplify.h"
 
 namespace Halide {
 
@@ -205,7 +206,10 @@ void CodeGen_MLIR::Visitor::visit(const Sub *op) {
 void CodeGen_MLIR::Visitor::visit(const Mul *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    if (op->type.is_int_or_uint())
+    int bits;
+    if (is_const_power_of_two_integer(op->b, &bits))
+        value = codegen(op->a << make_const(op->a.type(), bits));
+    else if (op->type.is_int_or_uint())
         value = builder.create<mlir::arith::MulIOp>(codegen(op->a), codegen(op->b));
     else if (op->type.is_float())
         value = builder.create<mlir::arith::MulFOp>(codegen(op->a), codegen(op->b));
@@ -214,7 +218,10 @@ void CodeGen_MLIR::Visitor::visit(const Mul *op) {
 void CodeGen_MLIR::Visitor::visit(const Div *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    if (op->type.is_int())
+    int bits;
+    if (is_const_power_of_two_integer(op->b, &bits))
+        value = codegen(op->a >> make_const(op->a.type(), bits));
+    else if (op->type.is_int())
         value = builder.create<mlir::arith::DivSIOp>(codegen(op->a), codegen(op->b));
     else if (op->type.is_uint())
         value = builder.create<mlir::arith::DivUIOp>(codegen(op->a), codegen(op->b));
@@ -225,7 +232,10 @@ void CodeGen_MLIR::Visitor::visit(const Div *op) {
 void CodeGen_MLIR::Visitor::visit(const Mod *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    if (op->type.is_int())
+    int bits;
+    if (is_const_power_of_two_integer(op->b, &bits))
+        value = codegen(op->a & make_const(op->a.type(), (1 << bits) - 1));
+    else if (op->type.is_int())
         value = builder.create<mlir::arith::RemSIOp>(codegen(op->a), codegen(op->b));
     else if (op->type.is_uint())
         value = builder.create<mlir::arith::RemUIOp>(codegen(op->a), codegen(op->b));
@@ -302,90 +312,55 @@ void CodeGen_MLIR::Visitor::visit(const GE *op) {
 void CodeGen_MLIR::Visitor::visit(const And *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    value = builder.create<mlir::arith::AndIOp>(codegen(NE::make(op->a, 0)), codegen(NE::make(op->b, 0)));
+    value = builder.create<mlir::arith::AndIOp>(codegen(NE::make(op->a, make_zero(op->a.type()))),
+                                                codegen(NE::make(op->b, make_zero(op->b.type()))));
 }
 
 void CodeGen_MLIR::Visitor::visit(const Or *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    value = builder.create<mlir::arith::OrIOp>(codegen(NE::make(op->a, 0)), codegen(NE::make(op->b, 0)));
+    value = builder.create<mlir::arith::OrIOp>(codegen(NE::make(op->a, make_zero(op->a.type()))),
+                                               codegen(NE::make(op->b, make_zero(op->b.type()))));
 }
 
 void CodeGen_MLIR::Visitor::visit(const Not *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    value = codegen(EQ::make(op->a, 0));
+    value = codegen(EQ::make(op->a, make_zero(op->a.type())));
 }
 
 void CodeGen_MLIR::Visitor::visit(const Select *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    // mlir::Value trueValue = codegen(op->true_value);
-    // mlir::Value falseValue = codegen(op->false_value);
-
-    // mlir::Block *trueBlock = builder.createBlock();
-
-    // builder.getLoc()
-#if 0
-    value = builder.create<mlir::cf::CondBranchOp>(
-        codegen(op->condition),
-        /*thenBuilder=*/
-        [&](mlir::OpBuilder &b, mlir::Location loc) {
-          b.create<mlir::scf::YieldOp>(loc, trueValue);
-        },
-        /*elseBuilder=*/
-        [&](mlir::OpBuilder &b, mlir::Location loc) {
-          b.create<mlir::scf::YieldOp>(loc, falseValue);
-        }).getResult(0);
-#endif
-#if 0
-    mlir::IntegerAttr allOnesAttr = builder.getIntegerAttr(condition.getType(),
-        llvm::APInt::getAllOnes(condition.getType().getIntOrFloatBitWidth()));
-    mlir::Value allOnes = builder.create<mlir::arith::ConstantOp>(allOnesAttr);
-    mlir::Value conditionNeg = builder.create<circt::comb::XorOp>(condition, allOnes);
-
-    builder.create<circt::calyx::AssignOp>(value, trueValue, condition);
-    builder.create<circt::calyx::AssignOp>(value, falseValue, conditionNeg);
-#endif
-#if 0
-    value = builder.create<mlir::scf::IfOp>(
-        codegen(op->condition),
-        /*thenBuilder=*/
-        [&](mlir::OpBuilder &b, mlir::Location loc) {
-          b.create<mlir::scf::YieldOp>(loc, trueValue);
-        },
-        /*elseBuilder=*/
-        [&](mlir::OpBuilder &b, mlir::Location loc) {
-          b.create<mlir::scf::YieldOp>(loc, falseValue);
-        }).getResult(0);
-#endif
+    value = builder.create<mlir::arith::SelectOp>(codegen(op->condition),
+                                                  codegen(op->true_value),
+                                                  codegen(op->false_value));
 }
 
 void CodeGen_MLIR::Visitor::visit(const Load *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
     debug(3) << "\tName: " << op->name << "\n";
 
-    mlir::Value buffer = sym_get(op->name + ".buffer");
-    mlir::Value index;
+    Expr index;
     if (op->type.is_scalar()) {
-        index = codegen(op->index);
+        index = op->index;
     } else if (Expr ramp_base = strided_ramp_base(op->index); ramp_base.defined()) {
-        index = codegen(ramp_base);
+        index = ramp_base;
     } else {
         user_error << "Unsupported load.";
     }
 
+    Expr offset = simplify(index * make_const(Int(64), op->type.bytes()));
     mlir::Value baseAddr = sym_get(op->name);
-    mlir::Value indexI64 = builder.create<mlir::arith::ExtUIOp>(builder.getI64Type(), index);
-    mlir::Value elementSize = builder.create<mlir::arith::ConstantOp>(builder.getI64IntegerAttr(op->type.bytes()));
-    mlir::Value offset = builder.create<mlir::arith::MulIOp>(indexI64, elementSize);
-    mlir::Value loadAddress = builder.create<mlir::arith::AddIOp>(baseAddr, offset);
-    mlir::Value loadAddressAsIndex = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), loadAddress);
+    mlir::Value address = builder.create<mlir::arith::AddIOp>(baseAddr, codegen(offset));
+    mlir::Value addressAsIndex = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), address);
+
+    mlir::Value buffer = sym_get(op->name + ".buffer");
 
     if (op->type.is_scalar()) {
-        value = builder.create<mlir::memref::LoadOp>(buffer, mlir::ValueRange{loadAddressAsIndex});
+        value = builder.create<mlir::memref::LoadOp>(buffer, mlir::ValueRange{addressAsIndex});
     } else {
-        value = builder.create<mlir::vector::LoadOp>(mlir_type_of(op->type), buffer, mlir::ValueRange{loadAddressAsIndex});
+        value = builder.create<mlir::vector::LoadOp>(mlir_type_of(op->type), buffer, mlir::ValueRange{addressAsIndex});
     }
 }
 
@@ -412,9 +387,6 @@ void CodeGen_MLIR::Visitor::visit(const Ramp *op) {
 void CodeGen_MLIR::Visitor::visit(const Broadcast *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    debug(2) << "AAAA: lanes: " << op->type.lanes() << " vs " << op->lanes << "\n";
-    debug(2) << "AAAA: type: " << op->type << " vs " << op->value.type() << "\n";
-
     value = builder.create<mlir::vector::SplatOp>(mlir_type_of(op->type), codegen(op->value));
 }
 
@@ -425,7 +397,9 @@ void CodeGen_MLIR::Visitor::visit(const Call *op) {
     for (const Expr &e : op->args)
         debug(3) << "\tArg: " << e << "\n";
 
-    if (op->is_intrinsic(Call::shift_left)) {
+    if (op->is_intrinsic(Call::bitwise_and)) {
+        value = builder.create<mlir::arith::AndIOp>(codegen(op->args[0]), codegen(op->args[1]));
+    } else if (op->is_intrinsic(Call::shift_left)) {
         value = builder.create<mlir::arith::ShLIOp>(codegen(op->args[0]), codegen(op->args[1]));
     } else if (op->is_intrinsic(Call::shift_right)) {
         if (op->type.is_int())
@@ -515,28 +489,27 @@ void CodeGen_MLIR::Visitor::visit(const Store *op) {
     debug(3) << "\tName: " << op->name << "\n";
     debug(3) << "\tValue lanes: " << op->value.type().lanes() << "\n";
 
-    mlir::Value value = codegen(op->value);
-    mlir::Value buffer = sym_get(op->name + ".buffer");
-    mlir::Value index;
+    Expr index;
     if (op->value.type().is_scalar()) {
-        index = codegen(op->index);
+        index = op->index;
     } else if (Expr ramp_base = strided_ramp_base(op->index); ramp_base.defined()) {
-        index = codegen(ramp_base);
+        index = ramp_base;
     } else {
         user_error << "Unsupported store.";
     }
 
+    Expr offset = simplify(index * make_const(Int(64), op->value.type().bytes()));
     mlir::Value baseAddr = sym_get(op->name);
-    mlir::Value indexI64 = builder.create<mlir::arith::ExtUIOp>(builder.getI64Type(), index);
-    mlir::Value elementSize = builder.create<mlir::arith::ConstantOp>(builder.getI64IntegerAttr(op->value.type().bytes()));
-    mlir::Value offset = builder.create<mlir::arith::MulIOp>(indexI64, elementSize);
-    mlir::Value storeAddress = builder.create<mlir::arith::AddIOp>(baseAddr, offset);
-    mlir::Value storeAddressAsIndex = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), storeAddress);
+    mlir::Value address = builder.create<mlir::arith::AddIOp>(baseAddr, codegen(offset));
+    mlir::Value addressAsIndex = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), address);
+
+    mlir::Value value = codegen(op->value);
+    mlir::Value buffer = sym_get(op->name + ".buffer");
 
     if (op->value.type().is_scalar())
-        builder.create<mlir::memref::StoreOp>(value, buffer, mlir::ValueRange{storeAddressAsIndex});
+        builder.create<mlir::memref::StoreOp>(value, buffer, mlir::ValueRange{addressAsIndex});
     else
-        builder.create<mlir::vector::StoreOp>(value, buffer, mlir::ValueRange{storeAddressAsIndex});
+        builder.create<mlir::vector::StoreOp>(value, buffer, mlir::ValueRange{addressAsIndex});
 }
 
 void CodeGen_MLIR::Visitor::visit(const Provide *op) {
@@ -552,12 +525,20 @@ void CodeGen_MLIR::Visitor::visit(const Allocate *op) {
     debug(3) << "  type: " << op->type << "\n";
     debug(3) << "  memory_type: " << int(op->memory_type) << "\n";
     debug(3) << "  size: " << size << "\n";
-
-    for (auto &ext : op->extents) {
+    for (auto &ext : op->extents)
         debug(3) << "  ext: " << ext << "\n";
-    }
 
+    internal_assert(op->type.is_scalar()) << "Local memories with vector types not supported.";
+
+    mlir::MemRefType type = mlir::MemRefType::get({size}, mlir_type_of(op->type));
+    mlir::memref::AllocOp alloc = builder.create<mlir::memref::AllocOp>(type);
+    mlir::Value constantZero = builder.create<mlir::arith::ConstantOp>(builder.getI64IntegerAttr(0));
+
+    sym_push(op->name, constantZero);
+    sym_push(op->name + ".buffer", alloc);
     codegen(op->body);
+    sym_pop(op->name + ".buffer");
+    sym_pop(op->name);
 }
 
 void CodeGen_MLIR::Visitor::visit(const Free *op) {
@@ -595,14 +576,10 @@ void CodeGen_MLIR::Visitor::visit(const IfThenElse *op) {
     debug(3) << "\tthen_case: " << op->then_case << "\n";
     debug(3) << "\telse_case: " << op->else_case << "\n";
 
-    codegen(op->condition);
-    codegen(op->then_case);
+    internal_assert(!op->else_case.defined()) << "Else case not supported yet.";
 
-    if (op->else_case.defined()) {
-        codegen(op->else_case);
-        // halide_buffer_t
-    } else {
-    }
+    codegen(For::make("if_then_branch", Cast::make(Int(32), Not::make(op->condition)), 1,
+                      ForType::Serial, DeviceAPI::None, op->then_case));
 }
 
 void CodeGen_MLIR::Visitor::visit(const Evaluate *op) {

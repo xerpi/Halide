@@ -264,6 +264,8 @@ void CodeGen_CIRCT_Xilinx_Dev::add_kernel(Stmt stmt, const std::string &name, co
 
     debug(1) << "[FSM to SV] Start.\n";
     mlir::PassManager pmFSMtoSV(mlir_module.getContext());
+    pmFSMtoSV.nest<circt::hw::HWModuleOp>().addPass(circt::seq::createLowerSeqHLMemPass());
+    pmFSMtoSV.addPass(mlir::createCanonicalizerPass());
     pmFSMtoSV.addPass(circt::createConvertFSMToSVPass());
     pmFSMtoSV.addPass(mlir::createCanonicalizerPass());
     pmFSMtoSV.addPass(circt::seq::createSeqLowerToSVPass());
