@@ -486,7 +486,7 @@ WEAK int halide_xrt_run(void *user_context,
 
             // Buffer not yet allocated. Allocate it now.
             if (buf->handle == XRT_NULL_HANDLE) {
-                buf->handle = xrtBOAlloc(context.device, buf->size, XRT_BO_FLAGS_NONE,
+                buf->handle = xrtBOAlloc(context.device, buf->size, XRT_BO_FLAGS_CACHEABLE,
                                          (xrtMemoryGroup)xrtKernelArgGroupId(state->handle, num_args));
                 if (buf->handle == XRT_NULL_HANDLE) {
                     error(user_context)
