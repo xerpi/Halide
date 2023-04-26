@@ -86,6 +86,7 @@ public:
         error_code = halide_xrt_acquire_context(
             user_context, &instance, &adapter, &device);
         if (error_code == halide_error_code_success) {
+            halide_start_clock(user_context);
             // queue = wgpuDeviceGetQueue(device);
         }
     }
@@ -113,16 +114,16 @@ struct XrtKernelState {
 
 WEAK int create_xrt_context(void *user_context) {
     unsigned int count = xclProbe();
-    print(user_context) << "XRT: create_xrt_context: found: " << count << " devices\n";
+    debug(user_context) << "XRT: create_xrt_context: found: " << count << " devices\n";
 
     if (count == 0) {
-        print(user_context) << "XRT: create_xrt_context: error: no devices were found\n";
+        error(user_context) << "XRT: create_xrt_context: error: no devices were found\n";
         return halide_error_code_gpu_device_error;
     }
 
     for (unsigned i = 0; i < count; i++) {
         xrtDeviceHandle device = xrtDeviceOpen(i);
-        print(user_context) << "XRT: create_xrt_context: xrtDeviceOpen: " << device << "\n";
+        debug(user_context) << "XRT: create_xrt_context: xrtDeviceOpen: " << device << "\n";
         if (device != nullptr) {
             global_device = device;
             return halide_error_code_success;
@@ -446,6 +447,7 @@ WEAK int halide_xrt_run(void *user_context,
     XrtKernelState *state;
     xrtRunHandle run_handle;
     uint32_t num_args;
+    uint64_t t_before, t_after;
 
     debug(user_context)
         << "XRT: halide_xrt_run (user_context: " << user_context << ", "
@@ -542,6 +544,8 @@ WEAK int halide_xrt_run(void *user_context,
 
     debug(user_context) << "XRT: halide_xrt_run: starting kernel: " << entry_name << "\n";
 
+    t_before = halide_current_time_ns(user_context);
+
     ret = xrtRunStart(run_handle);
     if (ret != 0) {
         error(user_context)
@@ -552,8 +556,16 @@ WEAK int halide_xrt_run(void *user_context,
         return halide_error_code_generic_error;
     }
 
-    xrtRunWait(run_handle);
+    ret = xrtRunWait(run_handle);
+
+    t_after = halide_current_time_ns(user_context);
+
     xrtRunClose(run_handle);
+
+    if (ret != ERT_CMD_STATE_COMPLETED)
+        return halide_error_code_generic_error;
+
+    print(user_context) << "XRT: '" << entry_name << "' execution took " << (t_after - t_before) << " ns\n";
 
     return halide_error_code_success;
 }
