@@ -36,7 +36,7 @@ public:
 protected:
     class Visitor : public IRVisitor {
     public:
-        Visitor(mlir::ImplicitLocOpBuilder &builder, const std::vector<std::string> &inputNames);
+        Visitor(mlir::ImplicitLocOpBuilder &builder, const std::vector<DeviceArgument> &args);
 
     protected:
         mlir::Value codegen(const Expr &);

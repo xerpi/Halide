@@ -25,29 +25,24 @@ bool CodeGen_MLIR::compile(mlir::LocationAttr &loc, mlir::ModuleOp &mlir_module,
     mlir::ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
 
     mlir::SmallVector<mlir::Type> inputs;
-    std::vector<std::string> inputNames;
     mlir::SmallVector<mlir::Type> results;
     mlir::SmallVector<mlir::NamedAttribute> funcAttrs;
     mlir::SmallVector<mlir::DictionaryAttr> funcArgAttrs;
 
-    for (const auto &arg : args) {
+    for (const auto &arg : args)
         inputs.push_back(arg.is_buffer ? builder.getI64Type() : mlir_type_of(builder, arg.type));
-        inputNames.push_back(arg.name);
-    }
 
     // Put memrefs at the end. Treat buffers as 1D
     for (const auto &arg : args) {
-        if (arg.is_buffer) {
+        if (arg.is_buffer)
             inputs.push_back(mlir::MemRefType::get({0}, mlir_type_of(builder, arg.type)));
-            inputNames.push_back(arg.name + ".buffer");
-        }
     }
 
     mlir::FunctionType functionType = builder.getFunctionType(inputs, results);
     mlir::func::FuncOp functionOp = builder.create<mlir::func::FuncOp>(builder.getStringAttr(name), functionType, funcAttrs, funcArgAttrs);
     builder.setInsertionPointToStart(functionOp.addEntryBlock());
 
-    CodeGen_MLIR::Visitor visitor(builder, inputNames);
+    CodeGen_MLIR::Visitor visitor(builder, args);
     stmt.accept(&visitor);
     builder.create<mlir::func::ReturnOp>();
 
@@ -82,14 +77,25 @@ mlir::Type CodeGen_MLIR::mlir_type_of(mlir::ImplicitLocOpBuilder &builder, Halid
     return mlir::Type();
 }
 
-CodeGen_MLIR::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, const std::vector<std::string> &inputNames)
+CodeGen_MLIR::Visitor::Visitor(mlir::ImplicitLocOpBuilder &builder, const std::vector<DeviceArgument> &args)
     : builder(builder) {
 
     mlir::func::FuncOp funcOp = cast<mlir::func::FuncOp>(builder.getBlock()->getParentOp());
 
     // Add function arguments to the symbol table
-    for (unsigned int i = 0; i < funcOp.getFunctionType().getNumInputs(); i++)
-        sym_push(inputNames[i], funcOp.getArgument(i));
+    size_t bufIdx = 0;
+    for (auto [index, arg] : llvm::enumerate(args)) {
+        mlir::Value value = funcOp.getArgument(index);
+        // MemRefs are at the end. Also shift the base address to a base index
+        if (arg.is_buffer) {
+            int bits = llvm::Log2_32_Ceil(mlir_type_of(arg.type).getIntOrFloatBitWidth() / 8);
+            mlir::Value bitsCst = builder.create<mlir::arith::ConstantOp>(builder.getIntegerAttr(builder.getI64Type(), bits));
+            value = builder.create<mlir::arith::ShRUIOp>(value, bitsCst);
+            sym_push(arg.name + ".buffer", funcOp.getArgument(bufIdx + args.size()));
+            bufIdx++;
+        }
+        sym_push(arg.name, value);
+    }
 }
 
 mlir::Value CodeGen_MLIR::Visitor::codegen(const Expr &e) {
@@ -350,9 +356,9 @@ void CodeGen_MLIR::Visitor::visit(const Load *op) {
         user_error << "Unsupported load.";
     }
 
-    Expr offset = simplify(index * make_const(Int(64), op->type.bytes()));
-    mlir::Value baseAddr = sym_get(op->name);
-    mlir::Value address = builder.create<mlir::arith::AddIOp>(baseAddr, codegen(offset));
+    mlir::Value baseIndex = sym_get(op->name);
+    mlir::Value indexI64 = builder.create<mlir::arith::ExtUIOp>(builder.getI64Type(), codegen(index));
+    mlir::Value address = builder.create<mlir::arith::AddIOp>(baseIndex, indexI64);
     mlir::Value addressAsIndex = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), address);
 
     mlir::Value buffer = sym_get(op->name + ".buffer");
@@ -498,9 +504,9 @@ void CodeGen_MLIR::Visitor::visit(const Store *op) {
         user_error << "Unsupported store.";
     }
 
-    Expr offset = simplify(index * make_const(Int(64), op->value.type().bytes()));
-    mlir::Value baseAddr = sym_get(op->name);
-    mlir::Value address = builder.create<mlir::arith::AddIOp>(baseAddr, codegen(offset));
+    mlir::Value baseIndex = sym_get(op->name);
+    mlir::Value indexI64 = builder.create<mlir::arith::ExtUIOp>(builder.getI64Type(), codegen(index));
+    mlir::Value address = builder.create<mlir::arith::AddIOp>(baseIndex, indexI64);
     mlir::Value addressAsIndex = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), address);
 
     mlir::Value value = codegen(op->value);
@@ -578,7 +584,7 @@ void CodeGen_MLIR::Visitor::visit(const IfThenElse *op) {
 
     internal_assert(!op->else_case.defined()) << "Else case not supported yet.";
 
-    codegen(For::make("if_then_branch", Cast::make(Int(32), Not::make(op->condition)), 1,
+    codegen(For::make("if_then_branch", 0, Cast::make(Int(32), op->condition),
                       ForType::Serial, DeviceAPI::None, op->then_case));
 }
 
