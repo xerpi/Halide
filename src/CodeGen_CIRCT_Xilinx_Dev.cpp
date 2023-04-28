@@ -885,7 +885,13 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &to
             /*elseCtor*/ [&]() { builder.create<circt::sv::IfOp>(
                                      hwModuleGetInputValue(mod, "ap_done"),
                                      /*thenCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ap_done_next, value1); },
-                                     /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ap_done_next, int_ap_done); }); });
+                                     /*elseCtor*/ [&]() { builder.create<circt::sv::IfOp>(
+                                                              int_ap_start_next_read,
+                                                              /*thenCtor*/ [&]() {
+                                                                  // For some reason doesn't work on real HW without this
+                                                                  // Done and start get stuck to 1 after the first execution
+                                                                  builder.create<circt::sv::BPAssignOp>(int_ap_done_next, value0); },
+                                                              /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(int_ap_done_next, int_ap_done); }); }); });
     });
 
     mlir::Value int_ap_idle_next = builder.create<circt::sv::LogicOp>(builder.getI1Type(), "int_ap_idle_next");
