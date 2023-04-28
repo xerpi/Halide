@@ -1052,27 +1052,27 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &to
                             pattern = std::make_unique<circt::sv::CaseBitPattern>(mlir::APInt(/*numBits=*/12, offset),
                                                                                   builder.getContext());
                             switch (offset) {
-                            case 0x00:
+                            case 0x00: /* Control Register (CTRL) */
                                 value = builder.create<circt::comb::ConcatOp>(mlir::ValueRange{
                                     builder.create<circt::hw::ConstantOp>(builder.getIntegerType(29), 0),
                                     int_ap_idle, int_ap_done, int_ap_start});
                                 break;
-                            case 0x04:
+                            case 0x04: /* Global Interrupt Enable (GIE) */
                                 value = builder.create<circt::comb::ConcatOp>(mlir::ValueRange{
                                     builder.create<circt::hw::ConstantOp>(builder.getIntegerType(31), 0),
                                     int_gie});
                                 break;
-                            case 0x08:
+                            case 0x08: /* IP Interrupt Enable (IER) */
                                 value = builder.create<circt::comb::ConcatOp>(mlir::ValueRange{
                                     builder.create<circt::hw::ConstantOp>(builder.getIntegerType(30), 0),
                                     int_ier});
                                 break;
-                            case 0x0C:
+                            case 0x0C: /* IP Interrupt Status (ISR) */
                                 value = builder.create<circt::comb::ConcatOp>(mlir::ValueRange{
                                     builder.create<circt::hw::ConstantOp>(builder.getIntegerType(30), 0),
                                     int_isr_ready, int_isr_done});
                                 break;
-                            default:
+                            default: /* Kernel args. Starting at 0x10 */
                                 const DeviceArgument &arg = kernelArgs[(offset - XRT_KERNEL_ARGS_OFFSET) >> 3];
                                 if ((offset % 8) == 0 || argGetHWBits(arg) > 32) {
                                     value = builder.create<circt::comb::ExtractOp>(hwModuleOutputValues[hwModuleGetOutputIndex(mod, arg.name)],
@@ -1089,8 +1089,10 @@ void CodeGen_CIRCT_Xilinx_Dev::generateControlAxi(mlir::ImplicitLocOpBuilder &to
             /*elseCtor*/ [&]() { builder.create<circt::sv::BPAssignOp>(rdata_next, rdata); });
     });
 
-    hwModuleOutputValues[hwModuleGetOutputIndex(mod, "interrupt")] =
-        builder.create<circt::hw::ConstantOp>(builder.getBoolAttr(false));
+    mlir::Value isr = builder.create<circt::comb::OrOp>(int_isr_done, int_isr_ready);
+    // Enabled when both the global interrupt enable (GIE) and interrupt enable register (IER) bits are asserted
+    mlir::Value interrupt = builder.create<circt::comb::AndOp>(int_gie, isr);
+    hwModuleOutputValues[hwModuleGetOutputIndex(mod, "interrupt")] = interrupt;
 
     // Set module output operands
     auto outputOp = mod.getBodyBlock()->getTerminator();
