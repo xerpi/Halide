@@ -291,7 +291,6 @@ void CodeGen_MLIR::Visitor::visit(const NE *op) {
 
 void CodeGen_MLIR::Visitor::visit(const LT *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
-    debug(2) << "\ttype: " << op->type << "\n";
 
     if (op->a.type().is_int_or_uint()) {
         mlir::arith::CmpIPredicate predicate = op->type.is_int() ? mlir::arith::CmpIPredicate::slt :
@@ -494,23 +493,21 @@ void CodeGen_MLIR::Visitor::visit(const For *op) {
     debug(3) << "\tForType: " << for_types[unsigned(op->for_type)] << "\n";
 
     mlir::Value min = codegen(op->min);
-    mlir::Value extent = codegen(op->extent);
-    mlir::Value max = builder.create<mlir::arith::AddIOp>(min, extent);
+    mlir::Value max = builder.create<mlir::arith::AddIOp>(min, codegen(op->extent));
     mlir::Value lb = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), min);
     mlir::Value ub = builder.create<mlir::arith::IndexCastOp>(builder.getIndexType(), max);
     mlir::Value step = builder.create<mlir::arith::ConstantIndexOp>(1);
 
     mlir::scf::ForOp forOp = builder.create<mlir::scf::ForOp>(lb, ub, step);
-    mlir::Region &forBody = forOp.getLoopBody();
+    {
+        mlir::OpBuilder::InsertionGuard guard(builder);
+        builder.setInsertionPointToStart(&forOp.getLoopBody().front());
 
-    mlir::ImplicitLocOpBuilder prevBuilder = builder;
-    builder = mlir::ImplicitLocOpBuilder::atBlockBegin(forBody.getLoc(), &forBody.front());
-
-    sym_push(op->name, builder.create<mlir::arith::IndexCastOp>(max.getType(), forOp.getInductionVar()));
-    codegen(op->body);
-    sym_pop(op->name);
-
-    builder = prevBuilder;
+        mlir::Value i = forOp.getInductionVar();
+        sym_push(op->name, builder.create<mlir::arith::IndexCastOp>(max.getType(), i));
+        codegen(op->body);
+        sym_pop(op->name);
+    }
 }
 
 void CodeGen_MLIR::Visitor::visit(const Store *op) {
