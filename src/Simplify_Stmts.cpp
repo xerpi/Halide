@@ -255,7 +255,7 @@ Stmt Simplify::visit(const For *op) {
         return Evaluate::make(0);
     } else if (extent_bounds.max_defined &&
                extent_bounds.max <= 1 &&
-               op->device_api == DeviceAPI::None) {
+               (op->device_api == DeviceAPI::None || op->device_api == DeviceAPI::XRT)) {
         Stmt s = LetStmt::make(op->name, new_min, new_body);
         if (extent_bounds.min < 1) {
             s = IfThenElse::make(0 < new_extent, s);
