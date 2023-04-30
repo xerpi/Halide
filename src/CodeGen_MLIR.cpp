@@ -274,45 +274,68 @@ void CodeGen_MLIR::Visitor::visit(const Max *op) {
 void CodeGen_MLIR::Visitor::visit(const EQ *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    value = builder.create<mlir::arith::CmpIOp>(mlir::arith::CmpIPredicate::eq, codegen(op->a), codegen(op->b));
+    if (op->a.type().is_int_or_uint())
+        value = builder.create<mlir::arith::CmpIOp>(mlir::arith::CmpIPredicate::eq, codegen(op->a), codegen(op->b));
+    else if (op->a.type().is_float())
+        value = builder.create<mlir::arith::CmpFOp>(mlir::arith::CmpFPredicate::OEQ, codegen(op->a), codegen(op->b));
 }
 
 void CodeGen_MLIR::Visitor::visit(const NE *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    value = builder.create<mlir::arith::CmpIOp>(mlir::arith::CmpIPredicate::ne, codegen(op->a), codegen(op->b));
+    if (op->a.type().is_int_or_uint())
+        value = builder.create<mlir::arith::CmpIOp>(mlir::arith::CmpIPredicate::ne, codegen(op->a), codegen(op->b));
+    else if (op->a.type().is_float())
+        value = builder.create<mlir::arith::CmpFOp>(mlir::arith::CmpFPredicate::ONE, codegen(op->a), codegen(op->b));
 }
 
 void CodeGen_MLIR::Visitor::visit(const LT *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
+    debug(2) << "\ttype: " << op->type << "\n";
 
-    mlir::arith::CmpIPredicate predicate = op->type.is_int() ? mlir::arith::CmpIPredicate::slt :
-                                                               mlir::arith::CmpIPredicate::ult;
-    value = builder.create<mlir::arith::CmpIOp>(predicate, codegen(op->a), codegen(op->b));
+    if (op->a.type().is_int_or_uint()) {
+        mlir::arith::CmpIPredicate predicate = op->type.is_int() ? mlir::arith::CmpIPredicate::slt :
+                                                                   mlir::arith::CmpIPredicate::ult;
+        value = builder.create<mlir::arith::CmpIOp>(predicate, codegen(op->a), codegen(op->b));
+    } else if (op->a.type().is_float()) {
+        value = builder.create<mlir::arith::CmpFOp>(mlir::arith::CmpFPredicate::OLT, codegen(op->a), codegen(op->b));
+    }
 }
 
 void CodeGen_MLIR::Visitor::visit(const LE *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    mlir::arith::CmpIPredicate predicate = op->type.is_int() ? mlir::arith::CmpIPredicate::sle :
-                                                               mlir::arith::CmpIPredicate::ule;
-    value = builder.create<mlir::arith::CmpIOp>(predicate, codegen(op->a), codegen(op->b));
+    if (op->a.type().is_int_or_uint()) {
+        mlir::arith::CmpIPredicate predicate = op->a.type().is_int() ? mlir::arith::CmpIPredicate::sle :
+                                                                       mlir::arith::CmpIPredicate::ule;
+        value = builder.create<mlir::arith::CmpIOp>(predicate, codegen(op->a), codegen(op->b));
+    } else if (op->a.type().is_float()) {
+        value = builder.create<mlir::arith::CmpFOp>(mlir::arith::CmpFPredicate::OLE, codegen(op->a), codegen(op->b));
+    }
 }
 
 void CodeGen_MLIR::Visitor::visit(const GT *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    mlir::arith::CmpIPredicate predicate = op->type.is_int() ? mlir::arith::CmpIPredicate::sgt :
-                                                               mlir::arith::CmpIPredicate::ugt;
-    value = builder.create<mlir::arith::CmpIOp>(predicate, codegen(op->a), codegen(op->b));
+    if (op->a.type().is_int_or_uint()) {
+        mlir::arith::CmpIPredicate predicate = op->a.type().is_int() ? mlir::arith::CmpIPredicate::sgt :
+                                                                       mlir::arith::CmpIPredicate::ugt;
+        value = builder.create<mlir::arith::CmpIOp>(predicate, codegen(op->a), codegen(op->b));
+    } else if (op->a.type().is_float()) {
+        value = builder.create<mlir::arith::CmpFOp>(mlir::arith::CmpFPredicate::OGT, codegen(op->a), codegen(op->b));
+    }
 }
 
 void CodeGen_MLIR::Visitor::visit(const GE *op) {
     debug(2) << __PRETTY_FUNCTION__ << "\n";
 
-    mlir::arith::CmpIPredicate predicate = op->type.is_int() ? mlir::arith::CmpIPredicate::sge :
-                                                               mlir::arith::CmpIPredicate::uge;
-    value = builder.create<mlir::arith::CmpIOp>(predicate, codegen(op->a), codegen(op->b));
+    if (op->a.type().is_int_or_uint()) {
+        mlir::arith::CmpIPredicate predicate = op->a.type().is_int() ? mlir::arith::CmpIPredicate::sge :
+                                                                       mlir::arith::CmpIPredicate::uge;
+        value = builder.create<mlir::arith::CmpIOp>(predicate, codegen(op->a), codegen(op->b));
+    } else if (op->a.type().is_float()) {
+        value = builder.create<mlir::arith::CmpFOp>(mlir::arith::CmpFPredicate::OGE, codegen(op->a), codegen(op->b));
+    }
 }
 
 void CodeGen_MLIR::Visitor::visit(const And *op) {
