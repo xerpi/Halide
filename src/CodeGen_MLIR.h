@@ -28,8 +28,7 @@ static inline int argGetHWBits(const DeviceArgument &arg) {
 class CodeGen_MLIR {
 public:
     bool compile(mlir::LocationAttr &loc, mlir::ModuleOp &mlir_module, Stmt stmt,
-                 const std::string &name, const std::vector<DeviceArgument> &args,
-                 int axiDataWidth);
+                 const std::string &name, const std::vector<DeviceArgument> &args);
 
     static mlir::Type mlir_type_of(mlir::ImplicitLocOpBuilder &builder, Halide::Type t);
 

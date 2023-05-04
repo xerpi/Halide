@@ -21,7 +21,7 @@ namespace Halide {
 namespace Internal {
 
 bool CodeGen_MLIR::compile(mlir::LocationAttr &loc, mlir::ModuleOp &mlir_module, Stmt stmt, const std::string &name,
-                           const std::vector<DeviceArgument> &args, int axiDataWidth) {
+                           const std::vector<DeviceArgument> &args) {
     mlir::ImplicitLocOpBuilder builder = mlir::ImplicitLocOpBuilder::atBlockEnd(loc, mlir_module.getBody());
 
     mlir::SmallVector<mlir::Type> inputs;

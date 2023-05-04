@@ -31,7 +31,7 @@ bool CodeGen_CIRCT_Dev::compile(mlir::LocationAttr &loc, mlir::ModuleOp &mlir_mo
 
     CodeGen_MLIR cgMlir;
     debug(1) << "[Generating MLIR for kernel '" << name << "']\n";
-    bool ret = cgMlir.compile(loc, mlir_module, stmt, name, args, axiDataWidth);
+    bool ret = cgMlir.compile(loc, mlir_module, stmt, name, args);
 
     debug(1) << "Original MLIR:\n";
     mlir_module.dump();
