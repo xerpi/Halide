@@ -87,14 +87,10 @@ public:
             user_context, &instance, &adapter, &device);
         if (error_code == halide_error_code_success) {
             halide_start_clock(user_context);
-            // queue = wgpuDeviceGetQueue(device);
         }
     }
 
     ALWAYS_INLINE ~XRTContext() {
-        // if (queue) {
-        //     wgpuQueueRelease(queue);
-        // }
         (void)halide_xrt_release_context(user_context);  // ignore errors
     }
 };
