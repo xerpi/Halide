@@ -2,7 +2,7 @@
 #include "device_buffer_utils.h"
 #include "device_interface.h"
 #include "printer.h"
-#include "scoped_spin_lock.h"
+#include "scoped_mutex_lock.h"
 
 #include "mini_xrt.h"
 
@@ -21,7 +21,7 @@ WEAK void *global_adapter = nullptr;
 WEAK xrtDeviceHandle global_device = nullptr;
 
 // Lock to synchronize access to the global XRT context.
-volatile ScopedSpinLock::AtomicFlag WEAK context_lock = 0;
+WEAK halide_mutex thread_lock;
 
 }  // namespace XRT
 }  // namespace Internal
@@ -38,14 +38,14 @@ WEAK int halide_xrt_acquire_context(void *user_context,
                                     void **adapter_ret,
                                     void **device_ret,
                                     bool create = true) {
-    halide_abort_if_false(user_context, &context_lock != nullptr);
-    while (__atomic_test_and_set(&context_lock, __ATOMIC_ACQUIRE)) {
-    }
+    halide_debug_assert(user_context, &thread_lock != nullptr);
+
+    halide_mutex_lock(&thread_lock);
 
     if (create && (global_device == nullptr)) {
         int status = create_xrt_context(user_context);
         if (status != halide_error_code_success) {
-            __atomic_clear(&context_lock, __ATOMIC_RELEASE);
+            halide_mutex_unlock(&thread_lock);
             return status;
         }
     }
@@ -58,7 +58,7 @@ WEAK int halide_xrt_acquire_context(void *user_context,
 }
 
 WEAK int halide_xrt_release_context(void *user_context) {
-    __atomic_clear(&context_lock, __ATOMIC_RELEASE);
+    halide_mutex_unlock(&thread_lock);
     return halide_error_code_success;
 }
 
