@@ -33,6 +33,7 @@ set(HEADER_FILES
     CodeGen_Internal.h
     CodeGen_LLVM.h
     CodeGen_Metal_Dev.h
+    CodeGen_MLIR.h
     CodeGen_OpenCL_Dev.h
     CodeGen_OpenGLCompute_Dev.h
     CodeGen_Posix.h
@@ -201,6 +202,7 @@ set(SOURCE_FILES
     CodeGen_Internal.cpp
     CodeGen_LLVM.cpp
     CodeGen_Metal_Dev.cpp
+    CodeGen_MLIR.cpp
     CodeGen_OpenCL_Dev.cpp
     CodeGen_OpenGLCompute_Dev.cpp
     CodeGen_Posix.cpp
